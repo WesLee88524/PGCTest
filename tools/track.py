@@ -107,6 +107,8 @@ def make_parser():
     parser.add_argument("--match_thresh", type=float, default=0.9, help="matching threshold for tracking")
     parser.add_argument("--min-box-area", type=float, default=100, help='filter out tiny boxes')
     parser.add_argument("--mot20", dest="mot20", default=False, action="store_true", help="test mot20.")
+    parser.add_argument("--pgc_ckpt", default=None, type=str, help="trained PGCTrack checkpoint")
+    parser.add_argument("--no_pgc", dest="use_pgc", default=True, action="store_false", help="disable PGCTrack")
     return parser
 
 

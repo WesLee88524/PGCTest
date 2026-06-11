@@ -242,7 +242,7 @@ class BYTETracker(object):
         # Predict the current location with KF
         STrack.multi_predict(strack_pool)
         if self.use_pgc:
-            self.pgc.update(strack_pool, self.frame_id)
+            self.pgc.update(strack_pool, self.frame_id, img_info)
             dists = pgc_association_distance(strack_pool, detections)
         else:
             dists = matching.iou_distance(strack_pool, detections)

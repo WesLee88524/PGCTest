@@ -48,7 +48,32 @@ class PGCRelationManager(object):
         self.max_stale = getattr(args, "pgc_max_stale", 30)
         self.residual_weight = getattr(args, "pgc_residual_weight", 0.12)
         self.occ_overlap_tau = getattr(args, "pgc_occ_overlap_tau", 0.08)
+        self.frame_width = 1.0
+        self.frame_height = 1.0
         self.pairs = {}
+        self.model = None
+        self.device = None
+        ckpt = getattr(args, "pgc_ckpt", None)
+        if ckpt:
+            self._load_model(ckpt, args)
+
+    def _load_model(self, ckpt_path, args=None):
+        try:
+            import torch
+            from .pgc_model import PGCTrackNet
+        except ImportError:
+            return
+        checkpoint = torch.load(ckpt_path, map_location="cpu")
+        model_args = checkpoint.get("args", {}) if isinstance(checkpoint, dict) else {}
+        hidden_dim = int(model_args.get("hidden_dim", getattr(args, "pgc_hidden_dim", 128)))
+        memory_len = int(model_args.get("memory_len", self.memory_len))
+        self.memory_len = memory_len
+        self.device = torch.device(getattr(args, "pgc_device", "cuda" if torch.cuda.is_available() else "cpu"))
+        self.model = PGCTrackNet(hidden_dim=hidden_dim, max_len=memory_len)
+        state_dict = checkpoint["model"] if isinstance(checkpoint, dict) and "model" in checkpoint else checkpoint
+        self.model.load_state_dict(state_dict, strict=True)
+        self.model.to(self.device)
+        self.model.eval()
 
     @staticmethod
     def _pair_key(track_a, track_b):
@@ -143,7 +168,11 @@ class PGCRelationManager(object):
             dtype=float,
         )
 
-    def update(self, tracks, frame_id):
+    def update(self, tracks, frame_id, img_info=None):
+        if img_info is not None:
+            self.frame_height = max(float(img_info[0]), 1.0)
+            self.frame_width = max(float(img_info[1]), 1.0)
+
         valid_tracks = [t for t in tracks if getattr(t, "track_id", 0) > 0 and t.mean is not None]
         for track in valid_tracks:
             track.pgc_reliability = self.track_reliability(track)
@@ -228,6 +257,10 @@ class PGCRelationManager(object):
         return np.average(desc, axis=0, weights=weights)
 
     def _apply_group_context(self, tracks, track_by_id):
+        if self.model is not None:
+            self._apply_learned_group_context(tracks, track_by_id)
+            return
+
         pair_items = defaultdict(list)
         for key, state in self.pairs.items():
             if state.state not in (PAIR_ACTIVE, PAIR_WEAK):
@@ -288,3 +321,103 @@ class PGCRelationManager(object):
             track.pgc_existence = float(np.clip(existence, 0.0, 1.0))
             track.pgc_pred_tlwh = pred_tlwh
 
+    def _pair_sequence(self, state, mirror=False):
+        seq = np.zeros((self.memory_len, 10), dtype=np.float32)
+        mask = np.zeros((self.memory_len,), dtype=bool)
+        if not state.descriptors:
+            return seq, mask
+        descriptors = [np.asarray(desc, dtype=np.float32).copy() for desc in list(state.descriptors)[-self.memory_len:]]
+        if mirror:
+            for desc in descriptors:
+                desc[0:2] *= -1.0
+                desc[2:4] *= -1.0
+                desc[6], desc[7] = desc[7], desc[6]
+                desc[8], desc[9] = desc[9], desc[8]
+        start = self.memory_len - len(descriptors)
+        seq[start:] = np.asarray(descriptors, dtype=np.float32)
+        mask[start:] = True
+        return seq, mask
+
+    def _target_feature(self, track):
+        tlwh = track.tlwh
+        vel = self._velocity(track)
+        return np.asarray(
+            [
+                tlwh[0] / self.frame_width,
+                tlwh[1] / self.frame_height,
+                tlwh[2] / self.frame_width,
+                tlwh[3] / self.frame_height,
+                vel[0] / self.frame_width,
+                vel[1] / self.frame_height,
+                float(np.clip(getattr(track, "score", 0.0), 0.0, 1.0)),
+                self.track_reliability(track),
+            ],
+            dtype=np.float32,
+        )
+
+    def _apply_learned_group_context(self, tracks, track_by_id):
+        import torch
+
+        pair_items = defaultdict(list)
+        for key, state in self.pairs.items():
+            if state.state not in (PAIR_ACTIVE, PAIR_WEAK) or not state.descriptors:
+                continue
+            tid_a, tid_b = key
+            if tid_a in track_by_id and tid_b in track_by_id:
+                pair_items[tid_a].append((state, False))
+                pair_items[tid_b].append((state, True))
+
+        active_tracks = []
+        target_feats = []
+        pair_seqs = []
+        pair_token_masks = []
+        pair_affinities = []
+        pair_masks = []
+
+        for track in tracks:
+            items = pair_items.get(track.track_id, [])[: self.k_max]
+            if not items:
+                continue
+            seq = np.zeros((self.k_max, self.memory_len, 10), dtype=np.float32)
+            token_mask = np.zeros((self.k_max, self.memory_len), dtype=bool)
+            affinity = np.zeros((self.k_max,), dtype=np.float32)
+            pair_mask = np.zeros((self.k_max,), dtype=bool)
+            for idx, (state, mirror) in enumerate(items):
+                seq[idx], token_mask[idx] = self._pair_sequence(state, mirror=mirror)
+                affinity[idx] = state.affinity
+                pair_mask[idx] = token_mask[idx].any()
+            if not pair_mask.any():
+                continue
+            active_tracks.append(track)
+            target_feats.append(self._target_feature(track))
+            pair_seqs.append(seq)
+            pair_token_masks.append(token_mask)
+            pair_affinities.append(affinity)
+            pair_masks.append(pair_mask)
+
+        if not active_tracks:
+            return
+
+        with torch.no_grad():
+            outputs = self.model(
+                torch.from_numpy(np.asarray(target_feats)).to(self.device),
+                torch.from_numpy(np.asarray(pair_seqs)).to(self.device),
+                torch.from_numpy(np.asarray(pair_token_masks)).to(self.device),
+                torch.from_numpy(np.asarray(pair_affinities)).to(self.device),
+                torch.from_numpy(np.asarray(pair_masks)).to(self.device),
+            )
+            deltas = outputs["delta"].detach().cpu().numpy()
+            occlusions = torch.sigmoid(outputs["occlusion_logit"]).detach().cpu().numpy()
+            existences = torch.sigmoid(outputs["existence_logit"]).detach().cpu().numpy()
+            reliabilities = outputs["group_reliability"].detach().cpu().numpy()
+
+        for idx, track in enumerate(active_tracks):
+            tlwh = track.tlwh.copy()
+            norm = np.asarray([tlwh[2], tlwh[3], tlwh[2], tlwh[3]], dtype=np.float32)
+            delta = np.clip(deltas[idx], -1.0, 1.0) * norm
+            pred_tlwh = tlwh + delta
+            pred_tlwh[2:] = np.maximum(pred_tlwh[2:], 1.0)
+            track.pgc_pred_tlwh = pred_tlwh
+            track.pgc_occlusion = float(np.clip(occlusions[idx], 0.0, 1.0))
+            track.pgc_existence = float(np.clip(existences[idx], 0.0, 1.0))
+            track.pgc_group_reliability = float(np.clip(reliabilities[idx], 0.0, 1.0))
