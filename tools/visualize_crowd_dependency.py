@@ -178,59 +178,220 @@ def color_for_id(track_id):
     return ((base * 3) % 255, (base * 7) % 255, (base * 11) % 255)
 
 
+PAIR_COLOR_A = (34, 126, 247)
+PAIR_COLOR_B = (239, 175, 51)
+LINK_COLOR = (0, 220, 255)
+INK = (38, 42, 50)
+MUTED = (120, 128, 140)
+GRID = (224, 229, 236)
+PAPER = (248, 250, 252)
+ALERT = (70, 96, 245)
+
+
+def blend_rect(image, pt1, pt2, color, alpha):
+    overlay = image.copy()
+    cv2.rectangle(overlay, pt1, pt2, color, -1)
+    cv2.addWeighted(overlay, alpha, image, 1.0 - alpha, 0, image)
+
+
+def put_label(image, text, org, color, scale=0.55, thickness=1, pad=5):
+    (tw, th), baseline = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, scale, thickness)
+    x, y = org
+    y = max(th + pad * 2, y)
+    cv2.rectangle(image, (x, y - th - pad * 2), (x + tw + pad * 2, y + baseline), (255, 255, 255), -1)
+    cv2.rectangle(image, (x, y - th - pad * 2), (x + tw + pad * 2, y + baseline), color, 2)
+    cv2.putText(image, text, (x + pad, y - pad), cv2.FONT_HERSHEY_SIMPLEX, scale, color, thickness, cv2.LINE_AA)
+
+
+def dashed_line(image, p0, p1, color, thickness=3, dash=18, gap=10):
+    p0 = np.asarray(p0, dtype=np.float32)
+    p1 = np.asarray(p1, dtype=np.float32)
+    length = float(np.linalg.norm(p1 - p0))
+    if length < 1e-6:
+        return
+    direction = (p1 - p0) / length
+    dist = 0.0
+    while dist < length:
+        start = p0 + direction * dist
+        end = p0 + direction * min(length, dist + dash)
+        cv2.line(image, tuple(start.astype(int)), tuple(end.astype(int)), color, thickness, cv2.LINE_AA)
+        dist += dash + gap
+
+
+def arrow_head(image, p0, p1, color, size=16):
+    p0 = np.asarray(p0, dtype=np.float32)
+    p1 = np.asarray(p1, dtype=np.float32)
+    direction = p1 - p0
+    norm = float(np.linalg.norm(direction))
+    if norm < 1e-6:
+        return
+    direction /= norm
+    normal = np.asarray([-direction[1], direction[0]], dtype=np.float32)
+    tip = p1
+    left = p1 - direction * size + normal * size * 0.45
+    right = p1 - direction * size - normal * size * 0.45
+    cv2.fillConvexPoly(image, np.asarray([tip, left, right], dtype=np.int32), color, cv2.LINE_AA)
+
+
+def fit_image(image, max_w, max_h):
+    scale = min(max_w / float(image.shape[1]), max_h / float(image.shape[0]))
+    size = (int(image.shape[1] * scale), int(image.shape[0] * scale))
+    return cv2.resize(image, size, interpolation=cv2.INTER_AREA), scale
+
+
 def draw_tracking_panel(image, objects, pair, rows):
-    panel = image.copy()
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    desat = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
+    panel = cv2.addWeighted(image, 0.48, desat, 0.52, 0)
+    blend_rect(panel, (0, 0), (panel.shape[1], panel.shape[0]), (18, 24, 32), 0.18)
     tid_a, tid_b = pair
+
     for track_id, obj in objects.items():
         box = tlwh_to_tlbr(obj["bbox"]).astype(int)
-        color = (160, 160, 160)
-        thickness = 1
         if track_id in pair:
-            color = color_for_id(track_id)
-            thickness = 4
-        cv2.rectangle(panel, tuple(box[:2]), tuple(box[2:]), color, thickness)
-        cv2.putText(panel, str(track_id), (box[0], max(18, box[1] - 5)), cv2.FONT_HERSHEY_SIMPLEX, 0.65, color, 2)
+            continue
+        cv2.rectangle(panel, tuple(box[:2]), tuple(box[2:]), (185, 190, 198), 1, cv2.LINE_AA)
+        cv2.putText(
+            panel,
+            str(track_id),
+            (box[0], max(16, box[1] - 5)),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.42,
+            (185, 190, 198),
+            1,
+            cv2.LINE_AA,
+        )
 
     if tid_a in objects and tid_b in objects:
         ca = bottom_center(objects[tid_a]["bbox"]).astype(int)
         cb = bottom_center(objects[tid_b]["bbox"]).astype(int)
-        cv2.line(panel, tuple(ca), tuple(cb), (0, 230, 255), 3)
+        dashed_line(panel, ca, cb, LINK_COLOR, 8, dash=22, gap=12)
+        dashed_line(panel, ca, cb, (255, 255, 255), 3, dash=22, gap=12)
+        arrow_head(panel, ca, cb, LINK_COLOR, size=22)
+        cv2.circle(panel, tuple(ca), 8, PAIR_COLOR_A, -1, cv2.LINE_AA)
+        cv2.circle(panel, tuple(cb), 8, PAIR_COLOR_B, -1, cv2.LINE_AA)
 
-    for tid, key, color in [(tid_a, "box_a", color_for_id(tid_a)), (tid_b, "box_b", color_for_id(tid_b))]:
-        pts = [bottom_center(row[key]).astype(int) for row in rows[-8:]]
+    for tid, key, color in [(tid_a, "box_a", PAIR_COLOR_A), (tid_b, "box_b", PAIR_COLOR_B)]:
+        pts = [bottom_center(row[key]).astype(int) for row in rows[-12:]]
         for p0, p1 in zip(pts[:-1], pts[1:]):
-            cv2.arrowedLine(panel, tuple(p0), tuple(p1), color, 2, tipLength=0.25)
+            cv2.arrowedLine(panel, tuple(p0), tuple(p1), color, 2, tipLength=0.20)
+
+    for tid, color, name in [(tid_a, PAIR_COLOR_A, "Target A"), (tid_b, PAIR_COLOR_B, "Target B")]:
+        if tid not in objects:
+            continue
+        box = tlwh_to_tlbr(objects[tid]["bbox"]).astype(int)
+        x1, y1, x2, y2 = box.tolist()
+        for thickness, alpha_color in [(10, color), (4, (255, 255, 255)), (3, color)]:
+            cv2.rectangle(panel, (x1, y1), (x2, y2), alpha_color, thickness, cv2.LINE_AA)
+        put_label(panel, "{} #{}".format(name, tid), (x1, y1 - 8), color, scale=0.58, thickness=2)
+
+    blend_rect(panel, (18, 18), (520, 84), (255, 255, 255), 0.82)
+    cv2.putText(panel, "Persistent neighboring pair in a crowded frame", (34, 47), cv2.FONT_HERSHEY_SIMPLEX, 0.72, INK, 2, cv2.LINE_AA)
+    cv2.putText(panel, "Non-pair pedestrians are intentionally muted.", (34, 73), cv2.FONT_HERSHEY_SIMPLEX, 0.48, MUTED, 1, cv2.LINE_AA)
     return panel
 
 
-def draw_curve(canvas, rect, xs, series, labels, colors, y_range, title):
+def contiguous_spans(mask, xs):
+    spans = []
+    start = None
+    last = None
+    for flag, x in zip(mask, xs):
+        if flag and start is None:
+            start = x
+        if not flag and start is not None:
+            spans.append((start, last))
+            start = None
+        last = x
+    if start is not None:
+        spans.append((start, last))
+    return spans
+
+
+def draw_curve(
+    canvas,
+    rect,
+    xs,
+    series,
+    labels,
+    colors,
+    y_range,
+    title,
+    y_label,
+    x_range,
+    current_frame,
+    crisis_spans=None,
+    show_x_label=False,
+):
     x0, y0, w, h = rect
-    cv2.rectangle(canvas, (x0, y0), (x0 + w, y0 + h), (235, 235, 235), 1)
-    cv2.putText(canvas, title, (x0, y0 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.62, (30, 30, 30), 2)
-    for frac in [0.0, 0.5, 1.0]:
-        y = int(y0 + h - frac * h)
-        cv2.line(canvas, (x0, y), (x0 + w, y), (235, 235, 235), 1)
+    crisis_spans = crisis_spans or []
+    cv2.rectangle(canvas, (x0, y0 - 42), (x0 + w, y0 + h + 38), (255, 255, 255), -1)
+    cv2.putText(canvas, title, (x0, y0 - 17), cv2.FONT_HERSHEY_SIMPLEX, 0.58, INK, 2, cv2.LINE_AA)
     if len(xs) <= 1:
         return
     ymin, ymax = y_range
     denom = max(ymax - ymin, 1e-6)
-    x_min, x_max = min(xs), max(xs)
+    x_min, x_max = x_range
     x_denom = max(x_max - x_min, 1)
+
+    def px_at(x):
+        return int(x0 + (x - x_min) / x_denom * w)
+
+    def py_at(value):
+        return int(y0 + h - np.clip((value - ymin) / denom, 0.0, 1.0) * h)
+
+    for span_start, span_end in crisis_spans:
+        sx = px_at(span_start - 0.5)
+        ex = px_at(span_end + 0.5)
+        blend_rect(canvas, (max(x0, sx), y0), (min(x0 + w, ex), y0 + h), (219, 233, 255), 0.58)
+
+    for frac in [0.0, 0.25, 0.5, 0.75, 1.0]:
+        y = int(y0 + h - frac * h)
+        cv2.line(canvas, (x0, y), (x0 + w, y), GRID, 1, cv2.LINE_AA)
+
+    cv2.line(canvas, (x0, y0 + h), (x0 + w, y0 + h), (144, 153, 166), 1, cv2.LINE_AA)
+    cv2.line(canvas, (x0, y0), (x0, y0 + h), (144, 153, 166), 1, cv2.LINE_AA)
+    cv2.putText(canvas, y_label, (x0 + 6, y0 + 18), cv2.FONT_HERSHEY_SIMPLEX, 0.38, MUTED, 1, cv2.LINE_AA)
+    cv2.putText(canvas, "{:.2f}".format(ymax), (x0 - 2, y0 - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.36, MUTED, 1, cv2.LINE_AA)
+    cv2.putText(canvas, "{:.2f}".format(ymin), (x0 - 2, y0 + h + 18), cv2.FONT_HERSHEY_SIMPLEX, 0.36, MUTED, 1, cv2.LINE_AA)
+
+    if current_frame is not None:
+        cx = px_at(current_frame)
+        dashed_line(canvas, (cx, y0 - 5), (cx, y0 + h + 5), ALERT, thickness=2, dash=8, gap=6)
+        if show_x_label:
+            put_label(canvas, "current frame {}".format(current_frame), (max(x0, cx - 92), y0 + h + 31), ALERT, scale=0.38, thickness=1, pad=4)
+
     for values, color in zip(series, colors):
         pts = []
         for x, value in zip(xs, values):
-            px = int(x0 + (x - x_min) / x_denom * w)
-            py = int(y0 + h - np.clip((value - ymin) / denom, 0.0, 1.0) * h)
-            pts.append((px, py))
+            pts.append((px_at(x), py_at(value)))
+        if len(pts) >= 2:
+            fill = np.asarray(pts + [(pts[-1][0], y0 + h), (pts[0][0], y0 + h)], dtype=np.int32)
+            overlay = canvas.copy()
+            cv2.fillPoly(overlay, [fill], color, cv2.LINE_AA)
+            cv2.addWeighted(overlay, 0.09, canvas, 0.91, 0, canvas)
         for p0, p1 in zip(pts[:-1], pts[1:]):
-            cv2.line(canvas, p0, p1, color, 2)
-        for pt in pts:
-            cv2.circle(canvas, pt, 3, color, -1)
-    lx = x0 + 12
+            cv2.line(canvas, p0, p1, color, 3, cv2.LINE_AA)
+        mark_step = max(1, len(pts) // 7)
+        for pt in pts[::mark_step]:
+            cv2.circle(canvas, pt, 4, (255, 255, 255), -1, cv2.LINE_AA)
+            cv2.circle(canvas, pt, 4, color, 2, cv2.LINE_AA)
+    lx = x0 + w - 8
     for label, color in zip(labels, colors):
-        cv2.rectangle(canvas, (lx, y0 + 12), (lx + 18, y0 + 26), color, -1)
-        cv2.putText(canvas, label, (lx + 25, y0 + 26), cv2.FONT_HERSHEY_SIMPLEX, 0.48, (45, 45, 45), 1)
-        lx += 145
+        (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.38, 1)
+        lx -= tw + 38
+        cv2.line(canvas, (lx, y0 - 23), (lx + 22, y0 - 23), color, 3, cv2.LINE_AA)
+        cv2.putText(canvas, label, (lx + 29, y0 - 18), cv2.FONT_HERSHEY_SIMPLEX, 0.38, MUTED, 1, cv2.LINE_AA)
+        lx -= 12
+    if show_x_label:
+        cv2.putText(canvas, "Frame index over the temporal window", (x0 + w - 255, y0 + h + 29), cv2.FONT_HERSHEY_SIMPLEX, 0.42, MUTED, 1, cv2.LINE_AA)
+
+
+def draw_metric_chip(canvas, x, y, label, value, color):
+    cv2.rectangle(canvas, (x, y), (x + 230, y + 64), (255, 255, 255), -1)
+    cv2.rectangle(canvas, (x, y), (x + 230, y + 64), (225, 230, 238), 1, cv2.LINE_AA)
+    cv2.circle(canvas, (x + 24, y + 32), 8, color, -1, cv2.LINE_AA)
+    cv2.putText(canvas, label, (x + 43, y + 27), cv2.FONT_HERSHEY_SIMPLEX, 0.41, MUTED, 1, cv2.LINE_AA)
+    cv2.putText(canvas, value, (x + 43, y + 51), cv2.FONT_HERSHEY_SIMPLEX, 0.62, INK, 2, cv2.LINE_AA)
 
 
 def make_figure(image, objects, best, video_name):
@@ -238,44 +399,52 @@ def make_figure(image, objects, best, video_name):
     metrics = best["metrics"]
     pair = best["pair"]
 
-    max_w = 980
-    scale = min(1.0, max_w / float(image.shape[1]))
-    if scale != 1.0:
-        image = cv2.resize(image, (int(image.shape[1] * scale), int(image.shape[0] * scale)))
-        scaled_objects = {}
-        for tid, obj in objects.items():
-            scaled = obj["bbox"].copy()
-            scaled *= scale
-            scaled_objects[tid] = {"bbox": scaled, "conf": obj["conf"]}
-        scaled_rows = []
-        for row in rows:
-            r = dict(row)
-            r["box_a"] = row["box_a"] * scale
-            r["box_b"] = row["box_b"] * scale
-            scaled_rows.append(r)
-        objects = scaled_objects
-        rows = scaled_rows
+    fig_w, fig_h = 1800, 1060
+    margin = 48
+    title_h = 116
+    left_w = 830
+    gutter = 42
+    right_x = margin + left_w + gutter
+    right_w = fig_w - right_x - margin
+    scene_h = 690
 
-    top = draw_tracking_panel(image, objects, pair, rows)
-    chart_h = 420
-    pad = 32
-    width = max(top.shape[1], 980)
-    canvas = np.ones((top.shape[0] + chart_h + pad * 2, width, 3), dtype=np.uint8) * 255
-    canvas[: top.shape[0], : top.shape[1]] = top
+    scene, scale = fit_image(image, left_w, scene_h)
+    scaled_objects = {}
+    for tid, obj in objects.items():
+        scaled = obj["bbox"].copy() * scale
+        scaled_objects[tid] = {"bbox": scaled, "conf": obj["conf"]}
+    scaled_rows = []
+    for row in rows:
+        r = dict(row)
+        r["box_a"] = row["box_a"] * scale
+        r["box_b"] = row["box_b"] * scale
+        scaled_rows.append(r)
 
-    title = "Crowded targets are not independent"
-    subtitle = "video={} frame={} pair=({}, {}) score={:.3f} dist={:.2f} occ-sync={:.2f}".format(
-        video_name,
-        best["frame_id"],
-        pair[0],
-        pair[1],
-        metrics["score"],
-        metrics["mean_distance"],
-        metrics["occlusion_sync"],
+    scene_panel = draw_tracking_panel(scene, scaled_objects, pair, scaled_rows)
+
+    canvas = np.ones((fig_h, fig_w, 3), dtype=np.uint8) * 255
+    cv2.rectangle(canvas, (0, 0), (fig_w, fig_h), PAPER, -1)
+
+    title = "Crowded Targets Are Not Independent"
+    subtitle = "A persistent neighboring pair provides measurable spatial, occlusion, and motion dependencies."
+    cv2.putText(canvas, title, (margin, 58), cv2.FONT_HERSHEY_SIMPLEX, 1.15, INK, 3, cv2.LINE_AA)
+    cv2.putText(canvas, subtitle, (margin, 91), cv2.FONT_HERSHEY_SIMPLEX, 0.62, MUTED, 1, cv2.LINE_AA)
+    meta = "video {} | frame {} | pair #{}-#{} | score {:.3f}".format(
+        video_name, best["frame_id"], pair[0], pair[1], metrics["score"]
     )
-    cv2.rectangle(canvas, (0, 0), (width, 58), (255, 255, 255), -1)
-    cv2.putText(canvas, title, (24, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.85, (20, 20, 20), 2)
-    cv2.putText(canvas, subtitle, (24, 52), cv2.FONT_HERSHEY_SIMPLEX, 0.52, (70, 70, 70), 1)
+    cv2.putText(canvas, meta, (fig_w - margin - 610, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.52, MUTED, 1, cv2.LINE_AA)
+
+    scene_x = margin
+    scene_y = title_h + 20
+    canvas[scene_y : scene_y + scene_panel.shape[0], scene_x : scene_x + scene_panel.shape[1]] = scene_panel
+    cv2.rectangle(
+        canvas,
+        (scene_x, scene_y),
+        (scene_x + scene_panel.shape[1], scene_y + scene_panel.shape[0]),
+        (215, 221, 230),
+        1,
+        cv2.LINE_AA,
+    )
 
     xs = [row["frame"] for row in best["rows"]]
     distances = [row["distance"] for row in best["rows"]]
@@ -286,25 +455,110 @@ def make_figure(image, objects, best, video_name):
     rel_x = rel[:, 0].tolist()
     rel_y = rel[:, 1].tolist()
 
-    y_base = top.shape[0] + pad + 10
-    chart_w = (width - pad * 3) // 2
-    draw_curve(canvas, (pad, y_base, chart_w, 145), xs, [distances], ["normalized distance"], [(40, 110, 220)], (0, max(3.0, max(distances) * 1.15)), "persistent spatial neighborhood")
-    draw_curve(canvas, (pad * 2 + chart_w, y_base, chart_w, 145), xs, [occ_a, occ_b, pair_ious], ["target A pressure", "target B pressure", "pair IoU"], [(30, 150, 70), (210, 100, 40), (120, 80, 200)], (0, 1.0), "correlated occlusion context")
+    occ_sum = np.asarray(occ_a, dtype=np.float32) + np.asarray(occ_b, dtype=np.float32) + np.asarray(pair_ious, dtype=np.float32)
+    crisis_threshold = max(0.18, float(np.percentile(occ_sum, 72)) if len(occ_sum) else 0.18)
+    crisis_mask = occ_sum >= crisis_threshold
+    crisis_spans = contiguous_spans(crisis_mask.tolist(), xs)
+    current_frame = best["frame_id"]
+    x_range = (min(xs), max(xs))
+
+    chip_y = scene_y + scene_panel.shape[0] + 24
+    draw_metric_chip(canvas, scene_x, chip_y, "persistence", "{:.0f}% of window".format(metrics["persistence"] * 100), PAIR_COLOR_A)
+    draw_metric_chip(canvas, scene_x + 250, chip_y, "mean distance", "{:.2f} body heights".format(metrics["mean_distance"]), LINK_COLOR)
+    draw_metric_chip(canvas, scene_x + 500, chip_y, "occlusion sync", "{:.2f}".format(metrics["occlusion_sync"]), ALERT)
+
+    note_y = chip_y + 92
+    cv2.putText(canvas, "The pair stays spatially close while sharing crowd pressure.", (scene_x, note_y), cv2.FONT_HERSHEY_SIMPLEX, 0.55, INK, 2, cv2.LINE_AA)
+    cv2.putText(canvas, "This turns a local ambiguity into a usable collaborative reference.", (scene_x, note_y + 28), cv2.FONT_HERSHEY_SIMPLEX, 0.55, MUTED, 1, cv2.LINE_AA)
+
+    chart_h = 178
+    chart_gap = 86
+    chart_y = scene_y + 38
+    draw_curve(
+        canvas,
+        (right_x, chart_y, right_w, chart_h),
+        xs,
+        [distances],
+        ["D_ij^t"],
+        [(47, 107, 214)],
+        (0, max(3.0, max(distances) * 1.18)),
+        "1. Persistent Spatial Proximity",
+        "norm. distance",
+        x_range,
+        current_frame,
+        crisis_spans=crisis_spans,
+    )
+    draw_curve(
+        canvas,
+        (right_x, chart_y + chart_h + chart_gap, right_w, chart_h),
+        xs,
+        [occ_a, occ_b, pair_ious],
+        ["O_i^t (A)", "O_j^t (B)", "IoU_ij^t"],
+        [(45, 156, 96), (236, 144, 54), (133, 92, 214)],
+        (0, 1.0),
+        "2. Correlated Occlusion Context",
+        "pressure / IoU",
+        x_range,
+        current_frame,
+        crisis_spans=crisis_spans,
+    )
     rel_min = float(min(min(rel_x), min(rel_y)))
     rel_max = float(max(max(rel_x), max(rel_y)))
     margin = max(20.0, (rel_max - rel_min) * 0.15)
-    draw_curve(canvas, (pad, y_base + 230, width - pad * 2, 145), xs, [rel_x, rel_y], ["relative x", "relative y"], [(200, 70, 70), (70, 130, 200)], (rel_min - margin, rel_max + margin), "stable relative motion can serve as collaborative reference")
+    draw_curve(
+        canvas,
+        (right_x, chart_y + 2 * (chart_h + chart_gap), right_w, chart_h),
+        xs,
+        [rel_x, rel_y],
+        ["Delta x_ij^t", "Delta y_ij^t"],
+        [(210, 75, 82), (44, 129, 196)],
+        (rel_min - margin, rel_max + margin),
+        "3. Stable Relative Motion",
+        "pixels",
+        x_range,
+        current_frame,
+        crisis_spans=crisis_spans,
+        show_x_label=True,
+    )
+
+    if crisis_spans:
+        span = crisis_spans[-1]
+        cv2.rectangle(canvas, (right_x, fig_h - 96), (right_x + 454, fig_h - 48), (255, 255, 255), -1)
+        cv2.rectangle(canvas, (right_x, fig_h - 96), (right_x + 454, fig_h - 48), (218, 225, 235), 1, cv2.LINE_AA)
+        cv2.rectangle(canvas, (right_x + 16, fig_h - 82), (right_x + 48, fig_h - 62), (219, 233, 255), -1)
+        cv2.putText(
+            canvas,
+            "highlighted interval: severe occlusion / detector ambiguity (frames {}-{})".format(span[0], span[1]),
+            (right_x + 60, fig_h - 65),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.42,
+            MUTED,
+            1,
+            cv2.LINE_AA,
+        )
+
     return canvas
 
 
 def save_summary(path, best, video_name, image_file):
     metrics = dict(best["metrics"])
+    occ_sum = np.asarray(
+        [row["occ_a"] + row["occ_b"] + row["iou"] for row in best["rows"]],
+        dtype=np.float32,
+    )
+    crisis_threshold = max(0.18, float(np.percentile(occ_sum, 72)) if len(occ_sum) else 0.18)
+    crisis_spans = contiguous_spans((occ_sum >= crisis_threshold).tolist(), [row["frame"] for row in best["rows"]])
     payload = {
         "video": video_name,
         "frame_id": int(best["frame_id"]),
         "image_file": image_file,
         "track_pair": [int(best["pair"][0]), int(best["pair"][1])],
         "metrics": metrics,
+        "crisis_region": {
+            "definition": "frames whose occlusion_pressure_a + occlusion_pressure_b + pair_iou is in the upper highlighted range",
+            "threshold": float(crisis_threshold),
+            "spans": [[int(start), int(end)] for start, end in crisis_spans],
+        },
         "series": [
             {
                 "frame": int(row["frame"]),
@@ -312,6 +566,8 @@ def save_summary(path, best, video_name, image_file):
                 "pair_iou": float(row["iou"]),
                 "occlusion_pressure_a": float(row["occ_a"]),
                 "occlusion_pressure_b": float(row["occ_b"]),
+                "relative_x": float(row["rel"][0]),
+                "relative_y": float(row["rel"][1]),
             }
             for row in best["rows"]
         ],
