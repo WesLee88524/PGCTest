@@ -8,6 +8,9 @@ from cython_bbox import bbox_overlaps as bbox_ious
 from yolox.tracker import kalman_filter
 import time
 
+if not hasattr(np, "float"):
+    np.float = float
+
 def merge_matches(m1, m2, shape):
     O,P,Q = shape
     m1 = np.asarray(m1)

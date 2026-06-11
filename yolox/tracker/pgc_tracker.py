@@ -1,0 +1,290 @@
+from collections import defaultdict, deque
+from dataclasses import dataclass, field
+
+import numpy as np
+
+from yolox.tracker import matching
+from .basetrack import TrackState
+
+
+PAIR_UNPAIRED = "U"
+PAIR_CANDIDATE = "C"
+PAIR_ACTIVE = "A"
+PAIR_WEAK = "W"
+
+
+@dataclass
+class PairState:
+    state: str = PAIR_UNPAIRED
+    affinity: float = 0.0
+    on_count: int = 0
+    off_count: int = 0
+    last_frame: int = 0
+    descriptors: deque = field(default_factory=deque)
+
+
+class PGCRelationManager(object):
+    """Online pair/group context used by PGCTrack.
+
+    This is the inference-time version of the method: relation memories are
+    explicit descriptor queues instead of learned Transformer features, so it
+    can run on top of an existing ByteTrack checkpoint.
+    """
+
+    def __init__(self, args=None):
+        self.lambda_dist = getattr(args, "pgc_lambda_dist", 0.35)
+        self.lambda_scale = getattr(args, "pgc_lambda_scale", 0.20)
+        self.lambda_motion = getattr(args, "pgc_lambda_motion", 0.20)
+        self.lambda_quality = getattr(args, "pgc_lambda_quality", 0.25)
+        self.alpha = getattr(args, "pgc_smooth_alpha", 0.75)
+        self.tau_dist = getattr(args, "pgc_tau_dist", 4.0)
+        self.tau_on = getattr(args, "pgc_tau_on", 0.48)
+        self.tau_weak = getattr(args, "pgc_tau_weak", 0.30)
+        self.tau_react = getattr(args, "pgc_tau_react", 0.42)
+        self.k_on = getattr(args, "pgc_k_on", 2)
+        self.k_off = getattr(args, "pgc_k_off", 8)
+        self.k_max = getattr(args, "pgc_k_max", 5)
+        self.memory_len = getattr(args, "pgc_memory_len", 8)
+        self.max_stale = getattr(args, "pgc_max_stale", 30)
+        self.residual_weight = getattr(args, "pgc_residual_weight", 0.12)
+        self.occ_overlap_tau = getattr(args, "pgc_occ_overlap_tau", 0.08)
+        self.pairs = {}
+
+    @staticmethod
+    def _pair_key(track_a, track_b):
+        return tuple(sorted((track_a.track_id, track_b.track_id)))
+
+    @staticmethod
+    def _center(tlwh):
+        return np.asarray([tlwh[0] + 0.5 * tlwh[2], tlwh[1] + 0.5 * tlwh[3]], dtype=float)
+
+    @staticmethod
+    def _bottom_center(tlwh):
+        return np.asarray([tlwh[0] + 0.5 * tlwh[2], tlwh[1] + tlwh[3]], dtype=float)
+
+    @staticmethod
+    def _velocity(track):
+        if track.mean is None or len(track.mean) < 6:
+            return np.zeros(2, dtype=float)
+        return np.asarray(track.mean[4:6], dtype=float)
+
+    @staticmethod
+    def track_reliability(track):
+        age = max(1, track.frame_id - track.start_frame + 1)
+        age_score = min(1.0, age / 10.0)
+        score = float(np.clip(getattr(track, "score", 0.0), 0.0, 1.0))
+        missing = max(0, getattr(track, "time_since_update", 0))
+        missing_score = np.exp(-missing / 6.0)
+        tracked_bonus = 1.0 if track.state == TrackState.Tracked else 0.65
+        return float(np.clip((0.50 * score + 0.30 * age_score + 0.20 * missing_score) * tracked_bonus, 0.0, 1.0))
+
+    @staticmethod
+    def missing_indicator(track):
+        return 0.0 if track.state == TrackState.Tracked and getattr(track, "time_since_update", 0) == 0 else 1.0
+
+    def _affinity_terms(self, track_i, track_j):
+        tlwh_i = track_i.tlwh
+        tlwh_j = track_j.tlwh
+        eps = 1e-6
+
+        bottom_i = self._bottom_center(tlwh_i)
+        bottom_j = self._bottom_center(tlwh_j)
+        norm_dist = np.linalg.norm(bottom_i - bottom_j) / ((tlwh_i[3] + tlwh_j[3]) * 0.5 + eps)
+        dist_aff = np.exp(-norm_dist)
+
+        scale_aff = np.exp(
+            -abs(np.log((tlwh_i[3] + eps) / (tlwh_j[3] + eps)))
+            -abs(np.log((tlwh_i[2] + eps) / (tlwh_j[2] + eps)))
+        )
+
+        vel_i = self._velocity(track_i)
+        vel_j = self._velocity(track_j)
+        motion_cos = float(np.dot(vel_i, vel_j) / (np.linalg.norm(vel_i) * np.linalg.norm(vel_j) + eps))
+        motion_aff = 0.5 * (1.0 + np.clip(motion_cos, -1.0, 1.0))
+
+        quality_aff = np.sqrt(self.track_reliability(track_i) * self.track_reliability(track_j))
+        affinity = (
+            self.lambda_dist * dist_aff
+            + self.lambda_scale * scale_aff
+            + self.lambda_motion * motion_aff
+            + self.lambda_quality * quality_aff
+        )
+        return float(np.clip(affinity, 0.0, 1.0)), float(norm_dist), motion_cos
+
+    def _descriptor(self, track_i, track_j, motion_cos):
+        tlwh_i = track_i.tlwh
+        tlwh_j = track_j.tlwh
+        eps = 1e-6
+        center_i = self._center(tlwh_i)
+        center_j = self._center(tlwh_j)
+        delta_pos = [
+            (center_j[0] - center_i[0]) / ((tlwh_i[2] + tlwh_j[2]) * 0.5 + eps),
+            (center_j[1] - center_i[1]) / ((tlwh_i[3] + tlwh_j[3]) * 0.5 + eps),
+        ]
+        delta_scale = [
+            np.log((tlwh_j[2] + eps) / (tlwh_i[2] + eps)),
+            np.log((tlwh_j[3] + eps) / (tlwh_i[3] + eps)),
+        ]
+        iou = 0.0
+        ious = matching.ious([track_i.tlbr], [track_j.tlbr])
+        if ious.size:
+            iou = float(ious[0, 0])
+        return np.asarray(
+            delta_pos
+            + delta_scale
+            + [
+                iou,
+                motion_cos,
+                self.track_reliability(track_i),
+                self.track_reliability(track_j),
+                self.missing_indicator(track_i),
+                self.missing_indicator(track_j),
+            ],
+            dtype=float,
+        )
+
+    def update(self, tracks, frame_id):
+        valid_tracks = [t for t in tracks if getattr(t, "track_id", 0) > 0 and t.mean is not None]
+        for track in valid_tracks:
+            track.pgc_reliability = self.track_reliability(track)
+            track.pgc_group_reliability = 0.0
+            track.pgc_occlusion = 0.0
+            track.pgc_existence = track.pgc_reliability
+            track.pgc_pred_tlwh = track.tlwh.copy()
+
+        candidates = []
+        for i, track_i in enumerate(valid_tracks):
+            for track_j in valid_tracks[i + 1:]:
+                affinity, norm_dist, motion_cos = self._affinity_terms(track_i, track_j)
+                if norm_dist < self.tau_dist:
+                    candidates.append((track_i, track_j, affinity, norm_dist, motion_cos))
+
+        selected_keys = set()
+        per_track = defaultdict(list)
+        for item in candidates:
+            track_i, track_j, affinity, _, _ = item
+            per_track[track_i.track_id].append((affinity, item))
+            per_track[track_j.track_id].append((affinity, item))
+        for items in per_track.values():
+            items.sort(key=lambda x: x[0], reverse=True)
+            for _, item in items[: self.k_max]:
+                selected_keys.add(self._pair_key(item[0], item[1]))
+
+        current_candidate_keys = set()
+        track_by_id = {t.track_id: t for t in valid_tracks}
+        for track_i, track_j, affinity, _, motion_cos in candidates:
+            key = self._pair_key(track_i, track_j)
+            if key not in selected_keys:
+                continue
+            current_candidate_keys.add(key)
+            state = self.pairs.setdefault(key, PairState(descriptors=deque(maxlen=self.memory_len)))
+            state.affinity = self.alpha * state.affinity + (1.0 - self.alpha) * affinity
+            state.last_frame = frame_id
+            self._advance_lifecycle(state, seen=True)
+            if state.state in (PAIR_ACTIVE, PAIR_WEAK):
+                state.descriptors.append(self._descriptor(track_i, track_j, motion_cos))
+
+        for key, state in list(self.pairs.items()):
+            if key in current_candidate_keys:
+                continue
+            state.affinity = self.alpha * state.affinity
+            self._advance_lifecycle(state, seen=False)
+            if frame_id - state.last_frame > self.max_stale or state.state == PAIR_UNPAIRED:
+                del self.pairs[key]
+
+        self._apply_group_context(valid_tracks, track_by_id)
+
+    def _advance_lifecycle(self, state, seen):
+        if seen and state.affinity > self.tau_on:
+            state.on_count += 1
+            state.off_count = 0
+        else:
+            state.on_count = 0
+            if state.state in (PAIR_ACTIVE, PAIR_WEAK):
+                state.off_count += 1
+
+        if state.state == PAIR_UNPAIRED and state.affinity > self.tau_on:
+            state.state = PAIR_CANDIDATE
+        if state.state == PAIR_CANDIDATE:
+            if state.on_count >= self.k_on:
+                state.state = PAIR_ACTIVE
+            elif not seen or state.affinity <= self.tau_weak:
+                state.state = PAIR_UNPAIRED
+        elif state.state == PAIR_ACTIVE and state.affinity < self.tau_weak:
+            state.state = PAIR_WEAK
+            state.off_count = 1
+        elif state.state == PAIR_WEAK:
+            if state.affinity > self.tau_react:
+                state.state = PAIR_ACTIVE
+                state.off_count = 0
+            elif state.off_count >= self.k_off:
+                state.state = PAIR_UNPAIRED
+
+    def _memory_vector(self, state):
+        if not state.descriptors:
+            return None
+        desc = np.asarray(state.descriptors, dtype=float)
+        weights = np.linspace(0.5, 1.0, num=len(desc), dtype=float)
+        return np.average(desc, axis=0, weights=weights)
+
+    def _apply_group_context(self, tracks, track_by_id):
+        pair_items = defaultdict(list)
+        for key, state in self.pairs.items():
+            if state.state not in (PAIR_ACTIVE, PAIR_WEAK):
+                continue
+            memory = self._memory_vector(state)
+            if memory is None:
+                continue
+            tid_a, tid_b = key
+            if tid_a in track_by_id and tid_b in track_by_id:
+                pair_items[tid_a].append((tid_b, state, memory, 1.0))
+                mirror = memory.copy()
+                mirror[0:2] *= -1.0
+                mirror[2:4] *= -1.0
+                mirror[6], mirror[7] = mirror[7], mirror[6]
+                mirror[8], mirror[9] = mirror[9], mirror[8]
+                pair_items[tid_b].append((tid_a, state, mirror, 1.0))
+
+        for track in tracks:
+            items = pair_items.get(track.track_id, [])
+            if not items:
+                continue
+            memories = np.asarray([item[2] for item in items], dtype=float)
+            affinities = np.asarray([item[1].affinity for item in items], dtype=float)
+            logits = affinities - 0.35 * np.linalg.norm(memories[:, 0:2], axis=1)
+            logits -= logits.max()
+            alpha = np.exp(logits)
+            alpha /= alpha.sum() + 1e-12
+            gates = 1.0 / (1.0 + np.exp(-(4.0 * affinities + memories[:, 6] + memories[:, 7] - 3.0)))
+            weighted = alpha * gates
+            group_reliability = float(np.clip(weighted.sum(), 0.0, 1.0))
+            context = np.sum(memories * weighted[:, None], axis=0)
+
+            crowd_overlap = float(np.clip(np.max(memories[:, 4]) if len(memories) else 0.0, 0.0, 1.0))
+            missing = self.missing_indicator(track)
+            occlusion = 1.0 / (
+                1.0
+                + np.exp(
+                    -(
+                        4.0 * (crowd_overlap - self.occ_overlap_tau)
+                        + 2.0 * group_reliability
+                        + 1.5 * missing
+                        - 1.4 * self.track_reliability(track)
+                    )
+                )
+            )
+            existence = self.track_reliability(track) * (0.60 + 0.40 * group_reliability)
+
+            pred_tlwh = track.tlwh.copy()
+            scale = np.asarray([pred_tlwh[2], pred_tlwh[3]], dtype=float)
+            velocity = self._velocity(track)
+            residual = -self.residual_weight * occlusion * group_reliability * context[0:2] * scale
+            residual += 0.05 * group_reliability * velocity
+            pred_tlwh[0:2] += residual
+
+            track.pgc_group_context = context
+            track.pgc_group_reliability = group_reliability
+            track.pgc_occlusion = float(np.clip(occlusion, 0.0, 1.0))
+            track.pgc_existence = float(np.clip(existence, 0.0, 1.0))
+            track.pgc_pred_tlwh = pred_tlwh
+
