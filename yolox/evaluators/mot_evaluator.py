@@ -109,6 +109,7 @@ class MOTEvaluator:
         data_list = []
         results = []
         video_names = defaultdict()
+        prev_video_name = None
         progress_bar = tqdm if is_main_process() else iter
 
         inference_time = 0
@@ -161,9 +162,10 @@ class MOTEvaluator:
                 if frame_id == 1:
                     tracker = BYTETracker(self.args)
                     if len(results) != 0:
-                        result_filename = os.path.join(result_folder, '{}.txt'.format(video_names[video_id - 1]))
+                        result_filename = os.path.join(result_folder, '{}.txt'.format(prev_video_name))
                         write_results(result_filename, results)
                         results = []
+                    prev_video_name = video_name
 
                 imgs = imgs.type(tensor_type)
 
@@ -253,6 +255,7 @@ class MOTEvaluator:
         data_list = []
         results = []
         video_names = defaultdict()
+        prev_video_name = None
         progress_bar = tqdm if is_main_process() else iter
 
         inference_time = 0
@@ -286,9 +289,10 @@ class MOTEvaluator:
                 if frame_id == 1:
                     tracker = Sort(self.args.track_thresh)
                     if len(results) != 0:
-                        result_filename = os.path.join(result_folder, '{}.txt'.format(video_names[video_id - 1]))
+                        result_filename = os.path.join(result_folder, '{}.txt'.format(prev_video_name))
                         write_results_no_score(result_filename, results)
                         results = []
+                    prev_video_name = video_name
 
                 imgs = imgs.type(tensor_type)
 
@@ -376,6 +380,7 @@ class MOTEvaluator:
         data_list = []
         results = []
         video_names = defaultdict()
+        prev_video_name = None
         progress_bar = tqdm if is_main_process() else iter
 
         inference_time = 0
@@ -409,9 +414,10 @@ class MOTEvaluator:
                 if frame_id == 1:
                     tracker = DeepSort(model_folder, min_confidence=self.args.track_thresh)
                     if len(results) != 0:
-                        result_filename = os.path.join(result_folder, '{}.txt'.format(video_names[video_id - 1]))
+                        result_filename = os.path.join(result_folder, '{}.txt'.format(prev_video_name))
                         write_results_no_score(result_filename, results)
                         results = []
+                    prev_video_name = video_name
 
                 imgs = imgs.type(tensor_type)
 
@@ -499,6 +505,7 @@ class MOTEvaluator:
         data_list = []
         results = []
         video_names = defaultdict()
+        prev_video_name = None
         progress_bar = tqdm if is_main_process() else iter
 
         inference_time = 0
@@ -531,9 +538,10 @@ class MOTEvaluator:
                 if frame_id == 1:
                     tracker = OnlineTracker(model_folder, min_cls_score=self.args.track_thresh)
                     if len(results) != 0:
-                        result_filename = os.path.join(result_folder, '{}.txt'.format(video_names[video_id - 1]))
+                        result_filename = os.path.join(result_folder, '{}.txt'.format(prev_video_name))
                         write_results(result_filename, results)
                         results = []
+                    prev_video_name = video_name
 
                 imgs = imgs.type(tensor_type)
 

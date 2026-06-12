@@ -258,12 +258,12 @@ def main(exp, args, num_gpu):
         trt_file = None
         decoder = None
 
-    if rank == 0:
-        duplicate_mot17_sdp_results(results_folder)
     # start evaluate
     *_, summary = evaluator.evaluate(
         model, is_distributed, args.fp16, trt_file, decoder, exp.test_size, results_folder
     )
+    if rank == 0:
+        duplicate_mot17_sdp_results(results_folder)
     logger.info("\n" + summary)
 
     # evaluate MOTA
