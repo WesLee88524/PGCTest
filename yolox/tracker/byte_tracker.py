@@ -224,9 +224,13 @@ class BYTETracker(object):
         self.pgc_virtual_occ_thresh = getattr(args, "pgc_virtual_occ_thresh", 0.55)
         self.pgc_virtual_rel_thresh = getattr(args, "pgc_virtual_rel_thresh", 0.35)
         self.pgc_virtual_assoc_thresh = getattr(args, "pgc_virtual_assoc_thresh", 0.20)
-        # self.pgc_virtual_max = getattr(args, "pgc_virtual_max", min(12, self.max_time_lost))
-
-        self.pgc_virtual_max = getattr(args, "pgc_virtual_max", 1)
+        pgc_virtual_max = getattr(args, "pgc_virtual_max", None)
+        if pgc_virtual_max is None:
+            pgc_virtual_max = min(12, self.max_time_lost)
+        self.pgc_virtual_max = int(pgc_virtual_max)
+        self.use_pgc_virtual = bool(getattr(args, "use_pgc_virtual", True)) and self.pgc_virtual_max > 0
+        self.use_pgc_low_relax = bool(getattr(args, "use_pgc_low_relax", True))
+        self.use_pgc_pred_assoc = bool(getattr(args, "use_pgc_pred_assoc", True))
         self.pgc_debug = PGCDebugLogger(args)
         if self.pgc is not None:
             self.pgc.debug_logger = self.pgc_debug
@@ -281,7 +285,12 @@ class BYTETracker(object):
         STrack.multi_predict(strack_pool)
         if self.use_pgc:
             self.pgc.update(strack_pool, self.frame_id, img_info)
-            dists, pgc_terms = pgc_association_distance(strack_pool, detections, return_components=True)
+            dists, pgc_terms = pgc_association_distance(
+                strack_pool,
+                detections,
+                use_pgc_pred=self.use_pgc_pred_assoc,
+                return_components=True,
+            )
             self._pgc_log_association("first_pre_fuse", strack_pool, detections, dists, pgc_terms)
         else:
             dists = matching.iou_distance(strack_pool, detections)
@@ -313,9 +322,15 @@ class BYTETracker(object):
             detections_second = []
         r_tracked_stracks = [strack_pool[i] for i in u_track if strack_pool[i].state == TrackState.Tracked]
         if self.use_pgc:
-            dists, pgc_terms = pgc_association_distance(r_tracked_stracks, detections_second, return_components=True)
+            dists, pgc_terms = pgc_association_distance(
+                r_tracked_stracks,
+                detections_second,
+                use_pgc_pred=self.use_pgc_pred_assoc,
+                return_components=True,
+            )
             self._pgc_log_association("second_pre_relax", r_tracked_stracks, detections_second, dists, pgc_terms)
-            dists = apply_pgc_low_conf_relaxation(dists, r_tracked_stracks, self.pgc_low_beta)
+            if self.use_pgc_low_relax:
+                dists = apply_pgc_low_conf_relaxation(dists, r_tracked_stracks, self.pgc_low_beta)
             self._pgc_log_association("second_post_relax", r_tracked_stracks, detections_second, dists, pgc_terms)
         else:
             dists = matching.iou_distance(r_tracked_stracks, detections_second)
@@ -336,7 +351,7 @@ class BYTETracker(object):
             track = r_tracked_stracks[it]
             if self.use_pgc:
                 track.mark_pgc_unmatched()
-            if self.use_pgc and self._pgc_virtual_maintenance(track):
+            if self.use_pgc and self.use_pgc_virtual and self._pgc_virtual_maintenance(track):
                 activated_starcks.append(track)
             elif not track.state == TrackState.Lost:
                 track.mark_lost()
@@ -466,14 +481,14 @@ class BYTETracker(object):
         )
 
 
-def pgc_association_distance(tracks, detections, lambda_iou=0.82, lambda_dist=0.18, return_components=False):
+def pgc_association_distance(tracks, detections, lambda_iou=0.82, lambda_dist=0.18, use_pgc_pred=True, return_components=False):
     if len(tracks) == 0 or len(detections) == 0:
         empty = np.zeros((len(tracks), len(detections)), dtype=float)
         if return_components:
             return empty, {"iou_cost": empty.copy(), "dist_cost": empty.copy()}
         return empty
 
-    track_tlwhs = [getattr(track, "pgc_pred_tlwh", track.tlwh) for track in tracks]
+    track_tlwhs = [getattr(track, "pgc_pred_tlwh", track.tlwh) if use_pgc_pred else track.tlwh for track in tracks]
     track_tlbrs = [STrack.tlwh_to_tlbr(tlwh) for tlwh in track_tlwhs]
     det_tlbrs = [det.tlbr for det in detections]
     iou_cost = 1.0 - matching.ious(track_tlbrs, det_tlbrs)

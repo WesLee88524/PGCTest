@@ -95,6 +95,10 @@ def make_parser():
     parser.add_argument("--pgc_debug_vis", default=False, action="store_true", help="save PGC debug visualizations")
     parser.add_argument("--pgc_tau_assoc", default=0.35, type=float, help="minimum association consistency for active PGC pairs")
     parser.add_argument("--pgc_virtual_assoc_thresh", default=0.20, type=float, help="minimum association consistency for PGC virtual maintenance")
+    parser.add_argument("--pgc_virtual_max", default=None, type=int, help="maximum consecutive PGC virtual updates; set 0 to disable")
+    parser.add_argument("--no_pgc_virtual", dest="use_pgc_virtual", default=True, action="store_false", help="disable PGC virtual maintenance")
+    parser.add_argument("--no_pgc_low_relax", dest="use_pgc_low_relax", default=True, action="store_false", help="disable PGC relaxation for low-score detections")
+    parser.add_argument("--no_pgc_pred_assoc", dest="use_pgc_pred_assoc", default=True, action="store_false", help="use KF boxes instead of PGC predicted boxes for association")
     parser.add_argument("--no_gui", default=False, action="store_true", help="disable all OpenCV GUI calls")
     return parser
 
