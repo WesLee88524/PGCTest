@@ -20,6 +20,7 @@ class MOTDataset(Dataset):
         name="train",
         img_size=(608, 1088),
         preproc=None,
+        keep_suffixes=None,
     ):
         """
         COCO dataset initialization. Annotation data are read into memory by COCO API.
@@ -35,9 +36,10 @@ class MOTDataset(Dataset):
             data_dir = os.path.join(get_yolox_datadir(), "mot")
         self.data_dir = data_dir
         self.json_file = json_file
+        self.keep_suffixes = tuple(keep_suffixes) if keep_suffixes is not None else None
 
         self.coco = COCO(os.path.join(self.data_dir, "annotations", self.json_file))
-        self.ids = self.coco.getImgIds()
+        self.ids = self._filter_img_ids(self.coco.getImgIds())
         self.class_ids = sorted(self.coco.getCatIds())
         cats = self.coco.loadCats(self.coco.getCatIds())
         self._classes = tuple([c["name"] for c in cats])
@@ -48,6 +50,18 @@ class MOTDataset(Dataset):
 
     def __len__(self):
         return len(self.ids)
+
+    def _filter_img_ids(self, img_ids):
+        if not self.keep_suffixes:
+            return img_ids
+        kept = []
+        for img_id in img_ids:
+            im_ann = self.coco.loadImgs(img_id)[0]
+            file_name = im_ann.get("file_name", "")
+            seq_name = file_name.split("/")[0]
+            if any(seq_name.endswith(suffix) for suffix in self.keep_suffixes):
+                kept.append(img_id)
+        return kept
 
     def _load_coco_annotations(self):
         return [self.load_anno_from_ids(_ids) for _ids in self.ids]

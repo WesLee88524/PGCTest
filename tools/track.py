@@ -17,6 +17,7 @@ import glob
 import motmetrics as mm
 from collections import OrderedDict
 from pathlib import Path
+import shutil
 
 
 def make_parser():
@@ -121,6 +122,7 @@ def make_parser():
     parser.add_argument("--allow_pgc_virtual_output", default=False, action="store_true", help="allow unmatched PGC predictions to update tracks and appear in outputs")
     parser.add_argument("--no_pgc_low_relax", dest="use_pgc_low_relax", default=True, action="store_false", help="disable PGC relaxation for low-score detections")
     parser.add_argument("--no_pgc_pred_assoc", dest="use_pgc_pred_assoc", default=True, action="store_false", help="use KF boxes instead of PGC predicted boxes for association")
+    parser.add_argument("--mot17_eval_suffixes", default="SDP", type=str, help="comma-separated MOT17 sequence suffixes to keep for evaluation, e.g. SDP or SDP,FRCNN,DPM")
     return parser
 
 
@@ -136,6 +138,27 @@ def compare_dataframes(gts, ts):
             logger.warning('No ground truth for {}, skipping.'.format(k))
 
     return accs, names
+
+
+def duplicate_mot17_sdp_results(results_folder):
+    """Copy MOT17 SDP tracking outputs to the matching FRCNN and DPM files.
+
+    The MOT17 train/val splits contain triplets with identical image content for
+    SDP/FRCNN/DPM variants of the same sequence. When we only run inference on
+    SDP, the other two result files can be duplicated for evaluation.
+    """
+    copied = 0
+    for src_path in glob.glob(os.path.join(results_folder, "MOT17-*-SDP.txt")):
+        src_name = os.path.splitext(os.path.basename(src_path))[0]
+        if not src_name.endswith("-SDP"):
+            continue
+        base_name = src_name[:-4]
+        for suffix in ("FRCNN", "DPM"):
+            dst_path = os.path.join(results_folder, "{}-{}.txt".format(base_name, suffix))
+            shutil.copyfile(src_path, dst_path)
+            copied += 1
+    if copied:
+        logger.info("Copied {} MOT17 SDP result files to FRCNN/DPM variants.".format(copied))
 
 
 @logger.catch
@@ -173,6 +196,10 @@ def main(exp, args, num_gpu):
         exp.nmsthre = args.nms
     if args.tsize is not None:
         exp.test_size = (args.tsize, args.tsize)
+    if args.mot17_eval_suffixes:
+        exp.eval_keep_mot17_suffixes = tuple(
+            suffix.strip() for suffix in args.mot17_eval_suffixes.split(",") if suffix.strip()
+        )
 
     model = exp.get_model()
     logger.info("Model Summary: {}".format(get_model_info(model, exp.test_size)))
@@ -225,6 +252,8 @@ def main(exp, args, num_gpu):
         trt_file = None
         decoder = None
 
+    if rank == 0:
+        duplicate_mot17_sdp_results(results_folder)
     # start evaluate
     *_, summary = evaluator.evaluate(
         model, is_distributed, args.fp16, trt_file, decoder, exp.test_size, results_folder
@@ -233,6 +262,8 @@ def main(exp, args, num_gpu):
 
     # evaluate MOTA
     mm.lap.default_solver = 'lap'
+
+    
 
     if exp.val_ann == 'val_half.json':
         gt_type = '_val_half'
