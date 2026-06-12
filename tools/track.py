@@ -109,6 +109,10 @@ def make_parser():
     parser.add_argument("--mot20", dest="mot20", default=False, action="store_true", help="test mot20.")
     parser.add_argument("--pgc_ckpt", default=None, type=str, help="trained PGCTrack checkpoint")
     parser.add_argument("--no_pgc", dest="use_pgc", default=True, action="store_false", help="disable PGCTrack")
+    parser.add_argument("--pgc_debug_dir", default=None, type=str, help="write PGC inference debug JSONL to this directory")
+    parser.add_argument("--pgc_debug_interval", default=1, type=int, help="log one frame every N frames")
+    parser.add_argument("--pgc_debug_topk", default=20, type=int, help="number of tracks/costs/pairs kept per debug event")
+    parser.add_argument("--pgc_debug_vis", default=False, action="store_true", help="save PGC debug visualizations when raw frames are available")
     return parser
 
 

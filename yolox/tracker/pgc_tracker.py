@@ -53,6 +53,7 @@ class PGCRelationManager(object):
         self.pairs = {}
         self.model = None
         self.device = None
+        self.debug_logger = None
         ckpt = getattr(args, "pgc_ckpt", None)
         if ckpt:
             self._load_model(ckpt, args)
@@ -221,7 +222,8 @@ class PGCRelationManager(object):
             if frame_id - state.last_frame > self.max_stale or state.state == PAIR_UNPAIRED:
                 del self.pairs[key]
 
-        self._apply_group_context(valid_tracks, track_by_id)
+        self._debug_log_pairs(frame_id, valid_tracks, candidates, selected_keys)
+        self._apply_group_context(valid_tracks, track_by_id, frame_id)
 
     def _advance_lifecycle(self, state, seen):
         if seen and state.affinity > self.tau_on:
@@ -256,9 +258,9 @@ class PGCRelationManager(object):
         weights = np.linspace(0.5, 1.0, num=len(desc), dtype=float)
         return np.average(desc, axis=0, weights=weights)
 
-    def _apply_group_context(self, tracks, track_by_id):
+    def _apply_group_context(self, tracks, track_by_id, frame_id):
         if self.model is not None:
-            self._apply_learned_group_context(tracks, track_by_id)
+            self._apply_learned_group_context(tracks, track_by_id, frame_id)
             return
 
         pair_items = defaultdict(list)
@@ -320,6 +322,15 @@ class PGCRelationManager(object):
             track.pgc_occlusion = float(np.clip(occlusion, 0.0, 1.0))
             track.pgc_existence = float(np.clip(existence, 0.0, 1.0))
             track.pgc_pred_tlwh = pred_tlwh
+            self._debug_log_track_context(
+                track,
+                source="heuristic",
+                pair_count=len(items),
+                context=context,
+                attention=alpha,
+                gates=gates,
+                frame_id=frame_id,
+            )
 
     def _pair_sequence(self, state, mirror=False):
         seq = np.zeros((self.memory_len, 10), dtype=np.float32)
@@ -355,7 +366,7 @@ class PGCRelationManager(object):
             dtype=np.float32,
         )
 
-    def _apply_learned_group_context(self, tracks, track_by_id):
+    def _apply_learned_group_context(self, tracks, track_by_id, frame_id):
         import torch
 
         pair_items = defaultdict(list)
@@ -410,6 +421,9 @@ class PGCRelationManager(object):
             occlusions = torch.sigmoid(outputs["occlusion_logit"]).detach().cpu().numpy()
             existences = torch.sigmoid(outputs["existence_logit"]).detach().cpu().numpy()
             reliabilities = outputs["group_reliability"].detach().cpu().numpy()
+            attentions = outputs["attention"].detach().cpu().numpy()
+            gates = outputs["gates"].detach().cpu().numpy()
+            pair_logits = outputs["pair_logits"].detach().cpu().numpy()
 
         for idx, track in enumerate(active_tracks):
             tlwh = track.tlwh.copy()
@@ -421,3 +435,92 @@ class PGCRelationManager(object):
             track.pgc_occlusion = float(np.clip(occlusions[idx], 0.0, 1.0))
             track.pgc_existence = float(np.clip(existences[idx], 0.0, 1.0))
             track.pgc_group_reliability = float(np.clip(reliabilities[idx], 0.0, 1.0))
+            self._debug_log_track_context(
+                track,
+                source="learned",
+                pair_count=int(np.asarray(pair_masks[idx]).sum()),
+                delta=deltas[idx],
+                attention=attentions[idx],
+                gates=gates[idx],
+                pair_logits=pair_logits[idx],
+                frame_id=frame_id,
+            )
+
+    def _debug_log_pairs(self, frame_id, tracks, candidates, selected_keys):
+        if self.debug_logger is None or not self.debug_logger.should_log(frame_id):
+            return
+        pair_state_counts = defaultdict(int)
+        pair_rows = []
+        for key, state in self.pairs.items():
+            pair_state_counts[state.state] += 1
+            if state.state in (PAIR_ACTIVE, PAIR_WEAK, PAIR_CANDIDATE):
+                pair_rows.append(
+                    {
+                        "ids": [int(key[0]), int(key[1])],
+                        "state": state.state,
+                        "affinity": round(float(state.affinity), 4),
+                        "on_count": int(state.on_count),
+                        "off_count": int(state.off_count),
+                        "memory_len": len(state.descriptors),
+                    }
+                )
+        pair_rows.sort(key=lambda x: x["affinity"], reverse=True)
+        candidate_rows = []
+        for track_i, track_j, affinity, norm_dist, motion_cos in sorted(candidates, key=lambda x: x[2], reverse=True):
+            if len(candidate_rows) >= self.debug_logger.topk:
+                break
+            key = self._pair_key(track_i, track_j)
+            candidate_rows.append(
+                {
+                    "ids": [int(key[0]), int(key[1])],
+                    "selected": key in selected_keys,
+                    "affinity": round(float(affinity), 4),
+                    "norm_dist": round(float(norm_dist), 4),
+                    "motion_cos": round(float(motion_cos), 4),
+                }
+            )
+        self.debug_logger.log(
+            {
+                "type": "pgc_pairs",
+                "frame_id": int(frame_id),
+                "num_tracks": len(tracks),
+                "num_candidates": len(candidates),
+                "num_selected_keys": len(selected_keys),
+                "pair_state_counts": dict(pair_state_counts),
+                "top_pairs": pair_rows[: self.debug_logger.topk],
+                "top_candidates": candidate_rows,
+            }
+        )
+
+    def _debug_log_track_context(self, track, source, pair_count, context=None, delta=None, attention=None, gates=None, pair_logits=None, frame_id=None):
+        frame_id = int(frame_id if frame_id is not None else getattr(track, "frame_id", 0))
+        if self.debug_logger is None or not self.debug_logger.should_log(frame_id):
+            return
+        tlwh = track.tlwh
+        pred = getattr(track, "pgc_pred_tlwh", tlwh)
+        center_shift = self._center(pred) - self._center(tlwh)
+        event = {
+            "type": "pgc_track_context",
+            "frame_id": frame_id,
+            "source": source,
+            "track_id": int(track.track_id),
+            "pair_count": int(pair_count),
+            "tlwh": [round(float(x), 4) for x in tlwh.tolist()],
+            "pgc_pred_tlwh": [round(float(x), 4) for x in pred.tolist()],
+            "pgc_center_shift": [round(float(x), 4) for x in center_shift.tolist()],
+            "pgc_reliability": round(float(getattr(track, "pgc_reliability", 0.0)), 4),
+            "pgc_group_reliability": round(float(getattr(track, "pgc_group_reliability", 0.0)), 4),
+            "pgc_occlusion": round(float(getattr(track, "pgc_occlusion", 0.0)), 4),
+            "pgc_existence": round(float(getattr(track, "pgc_existence", 0.0)), 4),
+        }
+        if context is not None:
+            event["context"] = [round(float(x), 4) for x in np.asarray(context).tolist()]
+        if delta is not None:
+            event["raw_delta"] = [round(float(x), 4) for x in np.asarray(delta).tolist()]
+        if attention is not None:
+            event["attention"] = [round(float(x), 4) for x in np.asarray(attention).tolist()]
+        if gates is not None:
+            event["gates"] = [round(float(x), 4) for x in np.asarray(gates).tolist()]
+        if pair_logits is not None:
+            event["pair_logits"] = [round(float(x), 4) for x in np.asarray(pair_logits).tolist()]
+        self.debug_logger.log(event)

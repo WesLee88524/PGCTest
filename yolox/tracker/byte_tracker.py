@@ -10,6 +10,13 @@ from .kalman_filter import KalmanFilter
 from yolox.tracker import matching
 from .basetrack import BaseTrack, TrackState
 from .pgc_tracker import PGCRelationManager
+from .pgc_debug import (
+    PGCDebugLogger,
+    summarize_cost_matrix,
+    summarize_matches,
+    summarize_tracks,
+    summarize_unmatched,
+)
 
 if not hasattr(np, "float"):
     np.float = float
@@ -192,6 +199,9 @@ class BYTETracker(object):
         self.pgc_virtual_occ_thresh = getattr(args, "pgc_virtual_occ_thresh", 0.55)
         self.pgc_virtual_rel_thresh = getattr(args, "pgc_virtual_rel_thresh", 0.35)
         self.pgc_virtual_max = getattr(args, "pgc_virtual_max", min(12, self.max_time_lost))
+        self.pgc_debug = PGCDebugLogger(args)
+        if self.pgc is not None:
+            self.pgc.debug_logger = self.pgc_debug
 
     def update(self, output_results, img_info, img_size):
         self.frame_id += 1
@@ -243,12 +253,17 @@ class BYTETracker(object):
         STrack.multi_predict(strack_pool)
         if self.use_pgc:
             self.pgc.update(strack_pool, self.frame_id, img_info)
-            dists = pgc_association_distance(strack_pool, detections)
+            dists, pgc_terms = pgc_association_distance(strack_pool, detections, return_components=True)
+            self._pgc_log_association("first_pre_fuse", strack_pool, detections, dists, pgc_terms)
         else:
             dists = matching.iou_distance(strack_pool, detections)
         if not self.args.mot20:
             dists = matching.fuse_score(dists, detections)
+        if self.use_pgc:
+            self._pgc_log_association("first_post_fuse", strack_pool, detections, dists, pgc_terms)
         matches, u_track, u_detection = matching.linear_assignment(dists, thresh=self.args.match_thresh)
+        if self.use_pgc:
+            self._pgc_log_matches("first", matches, u_track, u_detection, strack_pool, detections)
 
         for itracked, idet in matches:
             track = strack_pool[itracked]
@@ -270,11 +285,15 @@ class BYTETracker(object):
             detections_second = []
         r_tracked_stracks = [strack_pool[i] for i in u_track if strack_pool[i].state == TrackState.Tracked]
         if self.use_pgc:
-            dists = pgc_association_distance(r_tracked_stracks, detections_second)
+            dists, pgc_terms = pgc_association_distance(r_tracked_stracks, detections_second, return_components=True)
+            self._pgc_log_association("second_pre_relax", r_tracked_stracks, detections_second, dists, pgc_terms)
             dists = apply_pgc_low_conf_relaxation(dists, r_tracked_stracks, self.pgc_low_beta)
+            self._pgc_log_association("second_post_relax", r_tracked_stracks, detections_second, dists, pgc_terms)
         else:
             dists = matching.iou_distance(r_tracked_stracks, detections_second)
         matches, u_track, u_detection_second = matching.linear_assignment(dists, thresh=0.5)
+        if self.use_pgc:
+            self._pgc_log_matches("second", matches, u_track, u_detection_second, r_tracked_stracks, detections_second)
         for itracked, idet in matches:
             track = r_tracked_stracks[itracked]
             det = detections_second[idet]
@@ -332,32 +351,103 @@ class BYTETracker(object):
         self.tracked_stracks, self.lost_stracks = remove_duplicate_stracks(self.tracked_stracks, self.lost_stracks)
         # get scores of lost tracks
         output_stracks = [track for track in self.tracked_stracks if track.is_activated]
+        if self.use_pgc:
+            self.pgc_debug.flush_summary(self.frame_id, self)
 
         return output_stracks
 
     def _pgc_virtual_maintenance(self, track):
+        reason = "ok"
         if track.virtual_update_count >= self.pgc_virtual_max:
+            reason = "max_virtual_updates"
+            self._pgc_log_virtual(track, False, reason, 0.0)
             return False
         if track.pgc_occlusion <= self.pgc_virtual_occ_thresh:
+            reason = "low_occlusion"
+            self._pgc_log_virtual(track, False, reason, 0.0)
             return False
         if track.pgc_group_reliability <= self.pgc_virtual_rel_thresh:
+            reason = "low_group_reliability"
+            self._pgc_log_virtual(track, False, reason, 0.0)
             return False
         decay = np.exp(-(track.virtual_update_count + 1) / float(max(1, self.pgc_virtual_max)))
         virtual_score = track.pgc_existence * track.pgc_occlusion * track.pgc_group_reliability * decay
         track.virtual_update(track.pgc_pred_tlwh, self.frame_id, virtual_score)
+        self._pgc_log_virtual(track, True, reason, virtual_score)
         return True
 
+    def render_pgc_debug(self, image):
+        if not self.use_pgc:
+            return None
+        return self.pgc_debug.render(image, self, self.frame_id)
 
-def pgc_association_distance(tracks, detections, lambda_iou=0.82, lambda_dist=0.18):
+    def _pgc_log_association(self, stage, tracks, detections, dists, terms):
+        if not self.pgc_debug.should_log(self.frame_id):
+            return
+        event = {
+            "type": "association",
+            "stage": stage,
+            "frame_id": int(self.frame_id),
+            "num_tracks": len(tracks),
+            "num_detections": len(detections),
+            "tracks": summarize_tracks(tracks, topk=self.pgc_debug.topk),
+            "top_costs": summarize_cost_matrix(
+                tracks,
+                detections,
+                dists,
+                iou_cost=terms.get("iou_cost") if terms else None,
+                dist_cost=terms.get("dist_cost") if terms else None,
+                topk=self.pgc_debug.topk,
+            ),
+        }
+        self.pgc_debug.log(event)
+
+    def _pgc_log_matches(self, stage, matches, u_track, u_detection, tracks, detections):
+        if not self.pgc_debug.should_log(self.frame_id):
+            return
+        self.pgc_debug.log(
+            {
+                "type": "matches",
+                "stage": stage,
+                "frame_id": int(self.frame_id),
+                "matches": summarize_matches(matches, tracks, detections),
+                "unmatched_track_ids": summarize_unmatched(u_track, tracks),
+                "unmatched_detection_indices": [int(i) for i in u_detection],
+            }
+        )
+
+    def _pgc_log_virtual(self, track, applied, reason, score):
+        if not self.pgc_debug.should_log(self.frame_id):
+            return
+        self.pgc_debug.log(
+            {
+                "type": "virtual_maintenance",
+                "frame_id": int(self.frame_id),
+                "track_id": int(track.track_id),
+                "applied": bool(applied),
+                "reason": reason,
+                "virtual_score": round(float(score), 4),
+                "track": summarize_tracks([track], topk=1)[0],
+            }
+        )
+
+
+def pgc_association_distance(tracks, detections, lambda_iou=0.82, lambda_dist=0.18, return_components=False):
     if len(tracks) == 0 or len(detections) == 0:
-        return np.zeros((len(tracks), len(detections)), dtype=float)
+        empty = np.zeros((len(tracks), len(detections)), dtype=float)
+        if return_components:
+            return empty, {"iou_cost": empty.copy(), "dist_cost": empty.copy()}
+        return empty
 
     track_tlwhs = [getattr(track, "pgc_pred_tlwh", track.tlwh) for track in tracks]
     track_tlbrs = [STrack.tlwh_to_tlbr(tlwh) for tlwh in track_tlwhs]
     det_tlbrs = [det.tlbr for det in detections]
     iou_cost = 1.0 - matching.ious(track_tlbrs, det_tlbrs)
     dist_cost = normalized_center_distance(track_tlwhs, [det.tlwh for det in detections])
-    return lambda_iou * iou_cost + lambda_dist * dist_cost
+    total = lambda_iou * iou_cost + lambda_dist * dist_cost
+    if return_components:
+        return total, {"iou_cost": iou_cost, "dist_cost": dist_cost}
+    return total
 
 
 def normalized_center_distance(track_tlwhs, det_tlwhs):

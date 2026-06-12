@@ -89,6 +89,10 @@ def make_parser():
     parser.add_argument("--mot20", dest="mot20", default=False, action="store_true", help="test mot20.")
     parser.add_argument("--pgc_ckpt", default=None, type=str, help="trained PGCTrack checkpoint")
     parser.add_argument("--no_pgc", dest="use_pgc", default=True, action="store_false", help="disable PGCTrack")
+    parser.add_argument("--pgc_debug_dir", default=None, type=str, help="write PGC inference debug JSONL to this directory")
+    parser.add_argument("--pgc_debug_interval", default=1, type=int, help="log one frame every N frames")
+    parser.add_argument("--pgc_debug_topk", default=20, type=int, help="number of tracks/costs/pairs kept per debug event")
+    parser.add_argument("--pgc_debug_vis", default=False, action="store_true", help="save PGC debug visualizations")
     return parser
 
 
@@ -210,6 +214,7 @@ def image_demo(predictor, vis_folder, current_time, args):
             online_im = plot_tracking(
                 img_info['raw_img'], online_tlwhs, online_ids, frame_id=frame_id, fps=1. / timer.average_time
             )
+            tracker.render_pgc_debug(img_info['raw_img'])
         else:
             timer.toc()
             online_im = img_info['raw_img']
@@ -281,6 +286,7 @@ def imageflow_demo(predictor, vis_folder, current_time, args):
                 online_im = plot_tracking(
                     img_info['raw_img'], online_tlwhs, online_ids, frame_id=frame_id + 1, fps=1. / timer.average_time
                 )
+                tracker.render_pgc_debug(img_info['raw_img'])
             else:
                 timer.toc()
                 online_im = img_info['raw_img']
