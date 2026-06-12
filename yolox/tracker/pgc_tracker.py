@@ -17,6 +17,7 @@ PAIR_WEAK = "W"
 class PairState:
     state: str = PAIR_UNPAIRED
     affinity: float = 0.0
+    assoc_consistency: float = 0.0
     on_count: int = 0
     off_count: int = 0
     last_frame: int = 0
@@ -41,6 +42,7 @@ class PGCRelationManager(object):
         self.tau_on = getattr(args, "pgc_tau_on", 0.48)
         self.tau_weak = getattr(args, "pgc_tau_weak", 0.30)
         self.tau_react = getattr(args, "pgc_tau_react", 0.42)
+        self.tau_assoc = getattr(args, "pgc_tau_assoc", 0.35)
         self.k_on = getattr(args, "pgc_k_on", 2)
         self.k_off = getattr(args, "pgc_k_off", 8)
         self.k_max = getattr(args, "pgc_k_max", 5)
@@ -107,6 +109,25 @@ class PGCRelationManager(object):
     @staticmethod
     def missing_indicator(track):
         return 0.0 if track.state == TrackState.Tracked and getattr(track, "time_since_update", 0) == 0 else 1.0
+
+    @staticmethod
+    def association_consistency(track_i, track_j):
+        assoc_i = float(np.clip(getattr(track_i, "pgc_assoc_consistency", 0.0), 0.0, 1.0))
+        assoc_j = float(np.clip(getattr(track_j, "pgc_assoc_consistency", 0.0), 0.0, 1.0))
+        confirmed_i = bool(getattr(track_i, "pgc_detection_confirmed", False))
+        confirmed_j = bool(getattr(track_j, "pgc_detection_confirmed", False))
+        return float(min(assoc_i, assoc_j)) if confirmed_i and confirmed_j else 0.0
+
+    @staticmethod
+    def pair_update_frozen(track_i, track_j):
+        return (
+            track_i.state != TrackState.Tracked
+            or track_j.state != TrackState.Tracked
+            or not bool(getattr(track_i, "pgc_detection_confirmed", False))
+            or not bool(getattr(track_j, "pgc_detection_confirmed", False))
+            or getattr(track_i, "virtual_update_count", 0) > 0
+            or getattr(track_j, "virtual_update_count", 0) > 0
+        )
 
     def _affinity_terms(self, track_i, track_j):
         tlwh_i = track_i.tlwh
@@ -187,12 +208,16 @@ class PGCRelationManager(object):
             for track_j in valid_tracks[i + 1:]:
                 affinity, norm_dist, motion_cos = self._affinity_terms(track_i, track_j)
                 if norm_dist < self.tau_dist:
-                    candidates.append((track_i, track_j, affinity, norm_dist, motion_cos))
+                    assoc = self.association_consistency(track_i, track_j)
+                    frozen = self.pair_update_frozen(track_i, track_j)
+                    candidates.append((track_i, track_j, affinity, norm_dist, motion_cos, assoc, frozen))
 
         selected_keys = set()
         per_track = defaultdict(list)
         for item in candidates:
-            track_i, track_j, affinity, _, _ = item
+            track_i, track_j, affinity, _, _, assoc, frozen = item
+            if frozen or assoc < self.tau_assoc:
+                continue
             per_track[track_i.track_id].append((affinity, item))
             per_track[track_j.track_id].append((affinity, item))
         for items in per_track.values():
@@ -202,31 +227,40 @@ class PGCRelationManager(object):
 
         current_candidate_keys = set()
         track_by_id = {t.track_id: t for t in valid_tracks}
-        for track_i, track_j, affinity, _, motion_cos in candidates:
+        frozen_keys = set()
+        for track_i, track_j, affinity, _, motion_cos, assoc, frozen in candidates:
             key = self._pair_key(track_i, track_j)
+            if frozen:
+                frozen_keys.add(key)
+                continue
             if key not in selected_keys:
                 continue
             current_candidate_keys.add(key)
             state = self.pairs.setdefault(key, PairState(descriptors=deque(maxlen=self.memory_len)))
             state.affinity = self.alpha * state.affinity + (1.0 - self.alpha) * affinity
+            state.assoc_consistency = self.alpha * state.assoc_consistency + (1.0 - self.alpha) * assoc
             state.last_frame = frame_id
-            self._advance_lifecycle(state, seen=True)
+            self._advance_lifecycle(state, seen=True, assoc_consistent=assoc >= self.tau_assoc)
             if state.state in (PAIR_ACTIVE, PAIR_WEAK):
                 state.descriptors.append(self._descriptor(track_i, track_j, motion_cos))
 
         for key, state in list(self.pairs.items()):
-            if key in current_candidate_keys:
+            if key in current_candidate_keys or key in frozen_keys:
+                continue
+            if key[0] in track_by_id and key[1] in track_by_id and self.pair_update_frozen(track_by_id[key[0]], track_by_id[key[1]]):
                 continue
             state.affinity = self.alpha * state.affinity
-            self._advance_lifecycle(state, seen=False)
+            state.assoc_consistency = self.alpha * state.assoc_consistency
+            self._advance_lifecycle(state, seen=False, assoc_consistent=False)
             if frame_id - state.last_frame > self.max_stale or state.state == PAIR_UNPAIRED:
                 del self.pairs[key]
 
         self._debug_log_pairs(frame_id, valid_tracks, candidates, selected_keys)
         self._apply_group_context(valid_tracks, track_by_id, frame_id)
 
-    def _advance_lifecycle(self, state, seen):
-        if seen and state.affinity > self.tau_on:
+    def _advance_lifecycle(self, state, seen, assoc_consistent=True):
+        active_observation = seen and assoc_consistent and state.affinity > self.tau_on
+        if active_observation:
             state.on_count += 1
             state.off_count = 0
         else:
@@ -234,18 +268,18 @@ class PGCRelationManager(object):
             if state.state in (PAIR_ACTIVE, PAIR_WEAK):
                 state.off_count += 1
 
-        if state.state == PAIR_UNPAIRED and state.affinity > self.tau_on:
+        if state.state == PAIR_UNPAIRED and active_observation:
             state.state = PAIR_CANDIDATE
         if state.state == PAIR_CANDIDATE:
             if state.on_count >= self.k_on:
                 state.state = PAIR_ACTIVE
-            elif not seen or state.affinity <= self.tau_weak:
+            elif not seen or not assoc_consistent or state.affinity <= self.tau_weak:
                 state.state = PAIR_UNPAIRED
         elif state.state == PAIR_ACTIVE and state.affinity < self.tau_weak:
             state.state = PAIR_WEAK
             state.off_count = 1
         elif state.state == PAIR_WEAK:
-            if state.affinity > self.tau_react:
+            if seen and assoc_consistent and state.affinity > self.tau_react:
                 state.state = PAIR_ACTIVE
                 state.off_count = 0
             elif state.off_count >= self.k_off:
@@ -327,6 +361,7 @@ class PGCRelationManager(object):
                 source="heuristic",
                 pair_count=len(items),
                 context=context,
+                residual=np.asarray([residual[0], residual[1], 0.0, 0.0], dtype=float),
                 attention=alpha,
                 gates=gates,
                 frame_id=frame_id,
@@ -428,8 +463,8 @@ class PGCRelationManager(object):
         for idx, track in enumerate(active_tracks):
             tlwh = track.tlwh.copy()
             norm = np.asarray([tlwh[2], tlwh[3], tlwh[2], tlwh[3]], dtype=np.float32)
-            delta = np.clip(deltas[idx], -1.0, 1.0) * norm
-            pred_tlwh = tlwh + delta
+            residual = np.clip(deltas[idx], -1.0, 1.0) * norm
+            pred_tlwh = tlwh + residual
             pred_tlwh[2:] = np.maximum(pred_tlwh[2:], 1.0)
             track.pgc_pred_tlwh = pred_tlwh
             track.pgc_occlusion = float(np.clip(occlusions[idx], 0.0, 1.0))
@@ -440,6 +475,7 @@ class PGCRelationManager(object):
                 source="learned",
                 pair_count=int(np.asarray(pair_masks[idx]).sum()),
                 delta=deltas[idx],
+                residual=residual,
                 attention=attentions[idx],
                 gates=gates[idx],
                 pair_logits=pair_logits[idx],
@@ -459,6 +495,7 @@ class PGCRelationManager(object):
                         "ids": [int(key[0]), int(key[1])],
                         "state": state.state,
                         "affinity": round(float(state.affinity), 4),
+                        "assoc_consistency": round(float(state.assoc_consistency), 4),
                         "on_count": int(state.on_count),
                         "off_count": int(state.off_count),
                         "memory_len": len(state.descriptors),
@@ -466,7 +503,7 @@ class PGCRelationManager(object):
                 )
         pair_rows.sort(key=lambda x: x["affinity"], reverse=True)
         candidate_rows = []
-        for track_i, track_j, affinity, norm_dist, motion_cos in sorted(candidates, key=lambda x: x[2], reverse=True):
+        for track_i, track_j, affinity, norm_dist, motion_cos, assoc, frozen in sorted(candidates, key=lambda x: x[2], reverse=True):
             if len(candidate_rows) >= self.debug_logger.topk:
                 break
             key = self._pair_key(track_i, track_j)
@@ -474,7 +511,9 @@ class PGCRelationManager(object):
                 {
                     "ids": [int(key[0]), int(key[1])],
                     "selected": key in selected_keys,
+                    "frozen": bool(frozen),
                     "affinity": round(float(affinity), 4),
+                    "assoc_consistency": round(float(assoc), 4),
                     "norm_dist": round(float(norm_dist), 4),
                     "motion_cos": round(float(motion_cos), 4),
                 }
@@ -492,7 +531,7 @@ class PGCRelationManager(object):
             }
         )
 
-    def _debug_log_track_context(self, track, source, pair_count, context=None, delta=None, attention=None, gates=None, pair_logits=None, frame_id=None):
+    def _debug_log_track_context(self, track, source, pair_count, context=None, delta=None, residual=None, attention=None, gates=None, pair_logits=None, frame_id=None):
         frame_id = int(frame_id if frame_id is not None else getattr(track, "frame_id", 0))
         if self.debug_logger is None or not self.debug_logger.should_log(frame_id):
             return
@@ -512,11 +551,15 @@ class PGCRelationManager(object):
             "pgc_group_reliability": round(float(getattr(track, "pgc_group_reliability", 0.0)), 4),
             "pgc_occlusion": round(float(getattr(track, "pgc_occlusion", 0.0)), 4),
             "pgc_existence": round(float(getattr(track, "pgc_existence", 0.0)), 4),
+            "pgc_assoc_consistency": round(float(getattr(track, "pgc_assoc_consistency", 0.0)), 4),
+            "pgc_detection_confirmed": bool(getattr(track, "pgc_detection_confirmed", False)),
         }
         if context is not None:
             event["context"] = [round(float(x), 4) for x in np.asarray(context).tolist()]
         if delta is not None:
             event["raw_delta"] = [round(float(x), 4) for x in np.asarray(delta).tolist()]
+        if residual is not None:
+            event["applied_residual_tlwh"] = [round(float(x), 4) for x in np.asarray(residual).tolist()]
         if attention is not None:
             event["attention"] = [round(float(x), 4) for x in np.asarray(attention).tolist()]
         if gates is not None:

@@ -40,6 +40,8 @@ class STrack(BaseTrack):
         self.pgc_occlusion = 0.0
         self.pgc_existence = 0.0
         self.pgc_pred_tlwh = self._tlwh.copy()
+        self.pgc_detection_confirmed = False
+        self.pgc_assoc_consistency = 1.0
 
     def predict(self):
         mean_state = self.mean.copy()
@@ -77,8 +79,11 @@ class STrack(BaseTrack):
         # self.is_activated = True
         self.frame_id = frame_id
         self.start_frame = frame_id
+        self.pgc_detection_confirmed = True
+        self.pgc_assoc_consistency = 1.0
 
     def re_activate(self, new_track, frame_id, new_id=False):
+        self._update_pgc_association_consistency(new_track.tlwh)
         self.mean, self.covariance = self.kalman_filter.update(
             self.mean, self.covariance, self.tlwh_to_xyah(new_track.tlwh)
         )
@@ -91,6 +96,7 @@ class STrack(BaseTrack):
         if new_id:
             self.track_id = self.next_id()
         self.score = new_track.score
+        self.pgc_detection_confirmed = True
 
     def update(self, new_track, frame_id):
         """
@@ -106,12 +112,14 @@ class STrack(BaseTrack):
         self.virtual_update_count = 0
 
         new_tlwh = new_track.tlwh
+        self._update_pgc_association_consistency(new_tlwh)
         self.mean, self.covariance = self.kalman_filter.update(
             self.mean, self.covariance, self.tlwh_to_xyah(new_tlwh))
         self.state = TrackState.Tracked
         self.is_activated = True
 
         self.score = new_track.score
+        self.pgc_detection_confirmed = True
 
     def virtual_update(self, pred_tlwh, frame_id, score):
         """Maintain a track through short occlusion using an internal prediction."""
@@ -124,6 +132,23 @@ class STrack(BaseTrack):
         self.state = TrackState.Tracked
         self.is_activated = True
         self.score = min(float(self.score), float(score))
+        self.pgc_detection_confirmed = False
+        self.pgc_assoc_consistency = 0.0
+
+    def mark_pgc_unmatched(self):
+        self.pgc_detection_confirmed = False
+        self.pgc_assoc_consistency = 0.0
+
+    def _update_pgc_association_consistency(self, det_tlwh):
+        pred_tlwh = np.asarray(getattr(self, "pgc_pred_tlwh", self.tlwh), dtype=float)
+        det_tlwh = np.asarray(det_tlwh, dtype=float)
+        pred_center = pred_tlwh[:2] + 0.5 * pred_tlwh[2:]
+        det_center = det_tlwh[:2] + 0.5 * det_tlwh[2:]
+        norm = 0.5 * (pred_tlwh[3] + det_tlwh[3]) + 1e-6
+        dist_score = np.exp(-np.linalg.norm(pred_center - det_center) / norm)
+        iou = matching.ious([self.tlwh_to_tlbr(pred_tlwh)], [self.tlwh_to_tlbr(det_tlwh)])
+        iou_score = float(iou[0, 0]) if iou.size else 0.0
+        self.pgc_assoc_consistency = float(np.clip(0.5 * dist_score + 0.5 * iou_score, 0.0, 1.0))
 
     @property
     # @jit(nopython=True)
@@ -306,6 +331,8 @@ class BYTETracker(object):
 
         for it in u_track:
             track = r_tracked_stracks[it]
+            if self.use_pgc:
+                track.mark_pgc_unmatched()
             if self.use_pgc and self._pgc_virtual_maintenance(track):
                 activated_starcks.append(track)
             elif not track.state == TrackState.Lost:

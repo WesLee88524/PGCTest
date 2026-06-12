@@ -48,6 +48,8 @@ def summarize_tracks(tracks, topk=12):
                 "pgc_group_reliability": round(float(getattr(track, "pgc_group_reliability", 0.0)), 4),
                 "pgc_occlusion": round(float(getattr(track, "pgc_occlusion", 0.0)), 4),
                 "pgc_existence": round(float(getattr(track, "pgc_existence", 0.0)), 4),
+                "pgc_assoc_consistency": round(float(getattr(track, "pgc_assoc_consistency", 0.0)), 4),
+                "pgc_detection_confirmed": bool(getattr(track, "pgc_detection_confirmed", False)),
             }
         )
     rows.sort(key=lambda x: (x["pgc_shift_px"], x["pgc_group_reliability"], x["pgc_occlusion"]), reverse=True)
