@@ -205,7 +205,13 @@ def main(exp, args, num_gpu):
     logger.info("Model Summary: {}".format(get_model_info(model, exp.test_size)))
     #logger.info("Model Structure:\n{}".format(str(model)))
 
-    val_loader = exp.get_eval_loader(args.batch_size, is_distributed, args.test)
+    if args.batch_size != 1:
+        logger.info(
+            "MOT tracking evaluation is sequential; overriding batch size {} -> 1.".format(
+                args.batch_size
+            )
+        )
+    val_loader = exp.get_eval_loader(1, is_distributed, args.test)
     evaluator = MOTEvaluator(
         args=args,
         dataloader=val_loader,
