@@ -224,7 +224,9 @@ class BYTETracker(object):
         self.pgc_virtual_occ_thresh = getattr(args, "pgc_virtual_occ_thresh", 0.55)
         self.pgc_virtual_rel_thresh = getattr(args, "pgc_virtual_rel_thresh", 0.35)
         self.pgc_virtual_assoc_thresh = getattr(args, "pgc_virtual_assoc_thresh", 0.20)
-        self.pgc_virtual_max = getattr(args, "pgc_virtual_max", min(12, self.max_time_lost))
+        # self.pgc_virtual_max = getattr(args, "pgc_virtual_max", min(12, self.max_time_lost))
+
+        self.pgc_virtual_max = getattr(args, "pgc_virtual_max", 1)
         self.pgc_debug = PGCDebugLogger(args)
         if self.pgc is not None:
             self.pgc.debug_logger = self.pgc_debug
