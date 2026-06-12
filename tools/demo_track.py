@@ -93,6 +93,7 @@ def make_parser():
     parser.add_argument("--pgc_debug_interval", default=1, type=int, help="log one frame every N frames")
     parser.add_argument("--pgc_debug_topk", default=20, type=int, help="number of tracks/costs/pairs kept per debug event")
     parser.add_argument("--pgc_debug_vis", default=False, action="store_true", help="save PGC debug visualizations")
+    parser.add_argument("--no_gui", default=False, action="store_true", help="disable all OpenCV GUI calls")
     return parser
 
 
@@ -229,9 +230,10 @@ def image_demo(predictor, vis_folder, current_time, args):
         if frame_id % 20 == 0:
             logger.info('Processing frame {} ({:.2f} fps)'.format(frame_id, 1. / max(1e-5, timer.average_time)))
 
-        ch = cv2.waitKey(0)
-        if ch == 27 or ch == ord("q") or ch == ord("Q"):
-            break
+        if not args.no_gui:
+            ch = cv2.waitKey(0)
+            if ch == 27 or ch == ord("q") or ch == ord("Q"):
+                break
 
     if args.save_result:
         res_file = osp.join(vis_folder, f"{timestamp}.txt")
@@ -292,9 +294,10 @@ def imageflow_demo(predictor, vis_folder, current_time, args):
                 online_im = img_info['raw_img']
             if args.save_result:
                 vid_writer.write(online_im)
-            ch = cv2.waitKey(1)
-            if ch == 27 or ch == ord("q") or ch == ord("Q"):
-                break
+            if not args.no_gui:
+                ch = cv2.waitKey(1)
+                if ch == 27 or ch == ord("q") or ch == ord("Q"):
+                    break
         else:
             break
         frame_id += 1
@@ -309,6 +312,9 @@ def imageflow_demo(predictor, vis_folder, current_time, args):
 def main(exp, args):
     if not args.experiment_name:
         args.experiment_name = exp.exp_name
+
+    if not args.no_gui and not os.environ.get("DISPLAY"):
+        args.no_gui = True
 
     output_dir = osp.join(exp.output_dir, args.experiment_name)
     os.makedirs(output_dir, exist_ok=True)
