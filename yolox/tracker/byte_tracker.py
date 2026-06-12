@@ -228,7 +228,8 @@ class BYTETracker(object):
         if pgc_virtual_max is None:
             pgc_virtual_max = min(12, self.max_time_lost)
         self.pgc_virtual_max = int(pgc_virtual_max)
-        self.use_pgc_virtual = bool(getattr(args, "use_pgc_virtual", True)) and self.pgc_virtual_max > 0
+        self.use_pgc_virtual = bool(getattr(args, "use_pgc_virtual", False)) and self.pgc_virtual_max > 0
+        self.allow_pgc_virtual_output = bool(getattr(args, "allow_pgc_virtual_output", False))
         self.use_pgc_low_relax = bool(getattr(args, "use_pgc_low_relax", True))
         self.use_pgc_pred_assoc = bool(getattr(args, "use_pgc_pred_assoc", True))
         self.pgc_debug = PGCDebugLogger(args)
@@ -351,7 +352,7 @@ class BYTETracker(object):
             track = r_tracked_stracks[it]
             if self.use_pgc:
                 track.mark_pgc_unmatched()
-            if self.use_pgc and self.use_pgc_virtual and self._pgc_virtual_maintenance(track):
+            if self.use_pgc and self.use_pgc_virtual and self.allow_pgc_virtual_output and self._pgc_virtual_maintenance(track):
                 activated_starcks.append(track)
             elif not track.state == TrackState.Lost:
                 track.mark_lost()
