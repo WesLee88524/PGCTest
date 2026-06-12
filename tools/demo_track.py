@@ -93,6 +93,8 @@ def make_parser():
     parser.add_argument("--pgc_debug_interval", default=1, type=int, help="log one frame every N frames")
     parser.add_argument("--pgc_debug_topk", default=20, type=int, help="number of tracks/costs/pairs kept per debug event")
     parser.add_argument("--pgc_debug_vis", default=False, action="store_true", help="save PGC debug visualizations")
+    parser.add_argument("--pgc_tau_assoc", default=0.35, type=float, help="minimum association consistency for active PGC pairs")
+    parser.add_argument("--pgc_virtual_assoc_thresh", default=0.20, type=float, help="minimum association consistency for PGC virtual maintenance")
     parser.add_argument("--no_gui", default=False, action="store_true", help="disable all OpenCV GUI calls")
     return parser
 

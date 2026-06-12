@@ -137,7 +137,7 @@ class STrack(BaseTrack):
 
     def mark_pgc_unmatched(self):
         self.pgc_detection_confirmed = False
-        self.pgc_assoc_consistency = 0.0
+        self.pgc_assoc_consistency = float(np.clip(0.5 * self.pgc_assoc_consistency, 0.0, 1.0))
 
     def _update_pgc_association_consistency(self, det_tlwh):
         pred_tlwh = np.asarray(getattr(self, "pgc_pred_tlwh", self.tlwh), dtype=float)
@@ -223,6 +223,7 @@ class BYTETracker(object):
         self.pgc_low_beta = getattr(args, "pgc_low_beta", 0.35)
         self.pgc_virtual_occ_thresh = getattr(args, "pgc_virtual_occ_thresh", 0.55)
         self.pgc_virtual_rel_thresh = getattr(args, "pgc_virtual_rel_thresh", 0.35)
+        self.pgc_virtual_assoc_thresh = getattr(args, "pgc_virtual_assoc_thresh", 0.20)
         self.pgc_virtual_max = getattr(args, "pgc_virtual_max", min(12, self.max_time_lost))
         self.pgc_debug = PGCDebugLogger(args)
         if self.pgc is not None:
@@ -395,6 +396,10 @@ class BYTETracker(object):
             return False
         if track.pgc_group_reliability <= self.pgc_virtual_rel_thresh:
             reason = "low_group_reliability"
+            self._pgc_log_virtual(track, False, reason, 0.0)
+            return False
+        if track.pgc_assoc_consistency <= self.pgc_virtual_assoc_thresh:
+            reason = "low_assoc_consistency"
             self._pgc_log_virtual(track, False, reason, 0.0)
             return False
         decay = np.exp(-(track.virtual_update_count + 1) / float(max(1, self.pgc_virtual_max)))

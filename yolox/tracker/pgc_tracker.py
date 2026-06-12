@@ -18,6 +18,7 @@ class PairState:
     state: str = PAIR_UNPAIRED
     affinity: float = 0.0
     assoc_consistency: float = 0.0
+    frozen: bool = False
     on_count: int = 0
     off_count: int = 0
     last_frame: int = 0
@@ -237,6 +238,7 @@ class PGCRelationManager(object):
                 continue
             current_candidate_keys.add(key)
             state = self.pairs.setdefault(key, PairState(descriptors=deque(maxlen=self.memory_len)))
+            state.frozen = False
             state.affinity = self.alpha * state.affinity + (1.0 - self.alpha) * affinity
             state.assoc_consistency = self.alpha * state.assoc_consistency + (1.0 - self.alpha) * assoc
             state.last_frame = frame_id
@@ -246,9 +248,12 @@ class PGCRelationManager(object):
 
         for key, state in list(self.pairs.items()):
             if key in current_candidate_keys or key in frozen_keys:
+                state.frozen = True
                 continue
             if key[0] in track_by_id and key[1] in track_by_id and self.pair_update_frozen(track_by_id[key[0]], track_by_id[key[1]]):
+                state.frozen = True
                 continue
+            state.frozen = False
             state.affinity = self.alpha * state.affinity
             state.assoc_consistency = self.alpha * state.assoc_consistency
             self._advance_lifecycle(state, seen=False, assoc_consistent=False)
@@ -299,7 +304,7 @@ class PGCRelationManager(object):
 
         pair_items = defaultdict(list)
         for key, state in self.pairs.items():
-            if state.state not in (PAIR_ACTIVE, PAIR_WEAK):
+            if state.frozen or state.state not in (PAIR_ACTIVE, PAIR_WEAK):
                 continue
             memory = self._memory_vector(state)
             if memory is None:
@@ -406,7 +411,7 @@ class PGCRelationManager(object):
 
         pair_items = defaultdict(list)
         for key, state in self.pairs.items():
-            if state.state not in (PAIR_ACTIVE, PAIR_WEAK) or not state.descriptors:
+            if state.frozen or state.state not in (PAIR_ACTIVE, PAIR_WEAK) or not state.descriptors:
                 continue
             tid_a, tid_b = key
             if tid_a in track_by_id and tid_b in track_by_id:
@@ -494,6 +499,7 @@ class PGCRelationManager(object):
                     {
                         "ids": [int(key[0]), int(key[1])],
                         "state": state.state,
+                        "frozen": bool(state.frozen),
                         "affinity": round(float(state.affinity), 4),
                         "assoc_consistency": round(float(state.assoc_consistency), 4),
                         "on_count": int(state.on_count),
