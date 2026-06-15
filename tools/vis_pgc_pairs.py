@@ -223,6 +223,7 @@ def make_parser():
     parser.add_argument("--pgc_ckpt", type=str, default=None)
     parser.add_argument("--pair_vis_dir", type=str, default=None, help="directory to save per-frame pair overlays")
     parser.add_argument("--pair_min_count", type=int, default=2, help="minimum pair count to visualize a group")
+    parser.add_argument("--show_only_gid", type=int, default=None, help="only visualize a specific pair group id")
     return parser
 
 
@@ -358,6 +359,17 @@ def _draw_group_legend(image, groups, group_colors, max_rows=12):
         )
 
 
+def _filter_groups(groups, show_only_gid=None, min_count=2):
+    filtered = {}
+    for gid, tids in groups.items():
+        if show_only_gid is not None and gid != show_only_gid:
+            continue
+        if len(tids) < min_count:
+            continue
+        filtered[gid] = tids
+    return filtered
+
+
 def run_image_sequence(predictor, args, exp, save_folder):
     files = get_image_list(args.path) if osp.isdir(args.path) else [args.path]
     files.sort()
@@ -385,6 +397,7 @@ def run_image_sequence(predictor, args, exp, save_folder):
                         f"{frame_id},{tid},{tlwh[0]:.2f},{tlwh[1]:.2f},{tlwh[2]:.2f},{tlwh[3]:.2f},{t.score:.2f},-1,-1,-1\n"
                     )
         groups = _collect_pair_groups(tracker)
+        groups = _filter_groups(groups, show_only_gid=args.show_only_gid, min_count=args.pair_min_count)
         colors = _assign_group_colors(groups)
         vis_img = _draw_group_overlay(raw_img, tracker, groups, colors)
 
@@ -418,6 +431,7 @@ def run_video_sequence(predictor, args, exp, save_folder):
         if outputs[0] is not None:
             tracker.update(outputs[0], [img_info["height"], img_info["width"]], exp.test_size)
         groups = _collect_pair_groups(tracker)
+        groups = _filter_groups(groups, show_only_gid=args.show_only_gid, min_count=args.pair_min_count)
         colors = _assign_group_colors(groups)
         vis_img = _draw_group_overlay(img_info["raw_img"], tracker, groups, colors)
         vid_writer.write(vis_img)
