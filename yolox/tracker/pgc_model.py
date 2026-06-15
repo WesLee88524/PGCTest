@@ -47,6 +47,7 @@ class PGCTrackNet(nn.Module):
             nn.Linear(hidden_dim, 1),
         )
         self.pair_reliability = nn.Linear(hidden_dim, 1)
+        self.lifecycle_head = nn.Linear(hidden_dim, 4)
         self.fusion = nn.Sequential(
             nn.Linear(hidden_dim * 2, hidden_dim),
             nn.LayerNorm(hidden_dim),
@@ -94,12 +95,14 @@ class PGCTrackNet(nn.Module):
         fused = self.fusion(torch.cat([target_memory, group], dim=-1))
         pred = self.pred_head(fused)
         pair_logits = self.pair_reliability(pair_memory).squeeze(-1)
+        lifecycle_logits = self.lifecycle_head(pair_memory)
 
         return {
             "delta": pred[:, :4],
             "existence_logit": pred[:, 4],
             "occlusion_logit": pred[:, 5],
             "pair_logits": pair_logits,
+            "lifecycle_logits": lifecycle_logits,
             "pair_memory": pair_memory,
             "group_reliability": group_reliability,
             "attention": attn,
@@ -114,6 +117,7 @@ def pgc_loss(outputs, labels, weights=None):
     occ_weight = weights.get("occ", 1.0)
     pair_weight = weights.get("pair", 0.5)
     existence_weight = weights.get("existence", 0.2)
+    lifecycle_weight = weights.get("lifecycle", 0.5)
 
     motion = F.smooth_l1_loss(outputs["delta"], labels["delta"])
     occlusion = F.binary_cross_entropy_with_logits(outputs["occlusion_logit"], labels["occlusion"])
@@ -125,14 +129,20 @@ def pgc_loss(outputs, labels, weights=None):
             outputs["pair_logits"][pair_mask],
             labels["pair_label"][pair_mask],
         )
+        lifecycle = F.cross_entropy(
+            outputs["lifecycle_logits"][pair_mask],
+            labels["lifecycle"][pair_mask].long(),
+        )
     else:
         pair = outputs["pair_logits"].sum() * 0.0
+        lifecycle = outputs["lifecycle_logits"].sum() * 0.0
 
     total = (
         motion_weight * motion
         + occ_weight * occlusion
         + pair_weight * pair
         + existence_weight * existence
+        + lifecycle_weight * lifecycle
     )
     return {
         "total": total,
@@ -140,4 +150,5 @@ def pgc_loss(outputs, labels, weights=None):
         "occlusion": occlusion.detach(),
         "existence": existence.detach(),
         "pair": pair.detach(),
+        "lifecycle": lifecycle.detach(),
     }

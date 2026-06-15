@@ -98,6 +98,7 @@ class PGCMOTPairDataset(Dataset):
                             "prev_frame_id": prev["frame_id"] if prev is not None else None,
                             "next_frame_id": nxt["frame_id"],
                             "track_id": track_id,
+                            "history_frames": [fid for fid in frame_ids[max(0, idx - 7) : idx + 1]],
                         }
                     )
         return samples
@@ -170,6 +171,40 @@ class PGCMOTPairDataset(Dataset):
             mask[start + offset] = True
         return seq, mask
 
+    def _lifecycle_state(self, video_id, frame_ids, target_id, other_id):
+        """Map a pair to U/C/A/W using recent temporal stability statistics."""
+        valid = 0
+        stable = 0
+        recent_iou = []
+        for frame_id in frame_ids:
+            frame = self._frame_at(video_id, frame_id)
+            if frame is None:
+                continue
+            target_box = frame["boxes"].get(target_id)
+            other_box = frame["boxes"].get(other_id)
+            if target_box is None or other_box is None:
+                continue
+            valid += 1
+            iou = _iou_xyxy(
+                [target_box[0], target_box[1], target_box[0] + target_box[2], target_box[1] + target_box[3]],
+                [other_box[0], other_box[1], other_box[0] + other_box[2], other_box[1] + other_box[3]],
+            )
+            recent_iou.append(iou)
+            if iou > self.occ_iou_thresh:
+                stable += 1
+
+        if valid == 0:
+            return 0
+
+        ratio = stable / float(valid)
+        if ratio >= 0.75:
+            return 2  # A
+        if ratio >= 0.50:
+            return 1  # C
+        if ratio >= 0.25:
+            return 3  # W
+        return 0  # U
+
     def __getitem__(self, index):
         sample = self.samples[index]
         video_id = sample["video_id"]
@@ -222,6 +257,7 @@ class PGCMOTPairDataset(Dataset):
         pair_affinity = np.zeros((self.k_max,), dtype=np.float32)
         pair_mask = np.zeros((self.k_max,), dtype=bool)
         pair_label = np.zeros((self.k_max,), dtype=np.float32)
+        lifecycle = np.zeros((self.k_max,), dtype=np.int64)
 
         history_ids = list(range(max(1, cur_frame["frame_id"] - self.memory_len + 1), cur_frame["frame_id"] + 1))
         for idx, (center_dist, other_id, other_box) in enumerate(chosen):
@@ -231,6 +267,7 @@ class PGCMOTPairDataset(Dataset):
             pair_mask[idx] = bool(mask.any())
             pair_affinity[idx] = float(np.exp(-center_dist))
             pair_label[idx] = 1.0 if center_dist < self.pair_radius else 0.0
+            lifecycle[idx] = self._lifecycle_state(video_id, history_ids, track_id, other_id)
 
         delta = np.asarray(
             [
@@ -258,6 +295,7 @@ class PGCMOTPairDataset(Dataset):
             "occlusion": occlusion,
             "existence": existence,
             "pair_label": pair_label,
+            "lifecycle": lifecycle,
             "pair_mask": pair_mask.astype(np.float32),
         }
         return target_feat, pair_seqs, pair_token_masks, pair_affinity, pair_mask, labels
@@ -276,6 +314,7 @@ def collate_pgc(batch):
             "occlusion": torch.from_numpy(np.asarray([x["occlusion"] for x in labels])),
             "existence": torch.from_numpy(np.asarray([x["existence"] for x in labels])),
             "pair_label": torch.from_numpy(np.asarray([x["pair_label"] for x in labels])),
+            "lifecycle": torch.from_numpy(np.asarray([x["lifecycle"] for x in labels])),
             "pair_mask": torch.from_numpy(np.asarray([x["pair_mask"] for x in labels])),
         },
     }
