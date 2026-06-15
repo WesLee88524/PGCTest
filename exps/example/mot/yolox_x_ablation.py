@@ -99,6 +99,7 @@ class Exp(MyExp):
             json_file=self.val_ann,
             img_size=self.test_size,
             name='train',
+            keep_suffixes=getattr(self, 'eval_keep_mot17_suffixes', ('SDP',)),
             preproc=ValTransform(
                 rgb_means=(0.485, 0.456, 0.406),
                 std=(0.229, 0.224, 0.225),

@@ -20,6 +20,7 @@ class MOTDataset(Dataset):
         name="train",
         img_size=(608, 1088),
         preproc=None,
+        keep_suffixes=None,
     ):
         """
         COCO dataset initialization. Annotation data are read into memory by COCO API.
@@ -38,6 +39,16 @@ class MOTDataset(Dataset):
 
         self.coco = COCO(os.path.join(self.data_dir, "annotations", self.json_file))
         self.ids = self.coco.getImgIds()
+        self.keep_suffixes = tuple(keep_suffixes) if keep_suffixes is not None else None
+        if self.keep_suffixes:
+            kept_ids = []
+            for img_id in self.ids:
+                im_ann = self.coco.loadImgs(img_id)[0]
+                file_name = im_ann.get("file_name", "")
+                seq_name = file_name.split("/")[0]
+                if any(seq_name.endswith(suffix) for suffix in self.keep_suffixes):
+                    kept_ids.append(img_id)
+            self.ids = kept_ids
         self.class_ids = sorted(self.coco.getCatIds())
         cats = self.coco.loadCats(self.coco.getCatIds())
         self._classes = tuple([c["name"] for c in cats])

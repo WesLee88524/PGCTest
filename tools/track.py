@@ -17,6 +17,7 @@ import glob
 import motmetrics as mm
 from collections import OrderedDict
 from pathlib import Path
+import shutil
 
 
 def make_parser():
@@ -124,6 +125,21 @@ def compare_dataframes(gts, ts):
     return accs, names
 
 
+def duplicate_mot17_sdp_results(results_folder):
+    copied = 0
+    for src_path in glob.glob(os.path.join(results_folder, "MOT17-*-SDP.txt")):
+        src_name = os.path.splitext(os.path.basename(src_path))[0]
+        if not src_name.endswith("-SDP"):
+            continue
+        base_name = src_name[:-4]
+        for suffix in ("FRCNN", "DPM"):
+            dst_path = os.path.join(results_folder, "{}-{}.txt".format(base_name, suffix))
+            shutil.copyfile(src_path, dst_path)
+            copied += 1
+    if copied:
+        logger.info("Copied {} MOT17 SDP result files to FRCNN/DPM variants.".format(copied))
+
+
 @logger.catch
 def main(exp, args, num_gpu):
     if args.seed is not None:
@@ -159,6 +175,8 @@ def main(exp, args, num_gpu):
         exp.nmsthre = args.nms
     if args.tsize is not None:
         exp.test_size = (args.tsize, args.tsize)
+    if exp.val_ann == "val_half.json":
+        exp.eval_keep_mot17_suffixes = ("SDP",)
 
     model = exp.get_model()
     logger.info("Model Summary: {}".format(get_model_info(model, exp.test_size)))
@@ -210,6 +228,9 @@ def main(exp, args, num_gpu):
     else:
         trt_file = None
         decoder = None
+
+    if rank == 0:
+        duplicate_mot17_sdp_results(results_folder)
 
     # start evaluate
     *_, summary = evaluator.evaluate(
