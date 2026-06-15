@@ -2,11 +2,10 @@
 
 mes=$1
 
-git pull
+branch=$(git branch --show-current)
+
 git add .
-
 git commit -m "${mes}"
+git push -u origin ${branch}
 
-git push -u origin main
-
-echo "add and push $mes success!!"
+echo "add and push ${mes} success!!"
