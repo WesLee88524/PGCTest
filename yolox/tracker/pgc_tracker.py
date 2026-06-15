@@ -68,12 +68,28 @@ class PGCRelationManager(object):
         except ImportError:
             return
         checkpoint = torch.load(ckpt_path, map_location="cpu")
-        model_args = checkpoint.get("args", {}) if isinstance(checkpoint, dict) else {}
-        hidden_dim = int(model_args.get("hidden_dim", getattr(args, "pgc_hidden_dim", 128)))
-        memory_len = int(model_args.get("memory_len", self.memory_len))
+        model_args = {}
+        if isinstance(checkpoint, dict):
+            model_args = checkpoint.get("model_config", {}) or checkpoint.get("args", {}) or {}
+
+        def _cfg(*names, default):
+            for name in names:
+                if name in model_args and model_args[name] is not None:
+                    return model_args[name]
+            return default
+
+        hidden_dim = int(_cfg("pgc_hidden_dim", "hidden_dim", default=getattr(args, "pgc_hidden_dim", 128)))
+        memory_len = int(_cfg("pgc_memory_len", "memory_len", default=self.memory_len))
+        num_layers = int(_cfg("pgc_num_layers", "num_layers", default=getattr(args, "pgc_num_layers", 2)))
+        num_heads = int(_cfg("pgc_num_heads", "num_heads", default=getattr(args, "pgc_num_heads", 4)))
         self.memory_len = memory_len
         self.device = torch.device(getattr(args, "pgc_device", "cuda" if torch.cuda.is_available() else "cpu"))
-        self.model = PGCTrackNet(hidden_dim=hidden_dim, max_len=memory_len)
+        self.model = PGCTrackNet(
+            hidden_dim=hidden_dim,
+            num_layers=num_layers,
+            num_heads=num_heads,
+            max_len=memory_len,
+        )
         state_dict = checkpoint["model"] if isinstance(checkpoint, dict) and "model" in checkpoint else checkpoint
         self.model.load_state_dict(state_dict, strict=True)
         self.model.to(self.device)
@@ -461,4 +477,3 @@ class PGCRelationManager(object):
             track.pgc_occlusion = float(np.clip(occlusions[idx], 0.0, 1.0))
             track.pgc_existence = float(np.clip(existences[idx], 0.0, 1.0))
             track.pgc_group_reliability = float(np.clip(reliabilities[idx], 0.0, 1.0))
-

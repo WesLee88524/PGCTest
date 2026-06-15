@@ -480,6 +480,13 @@ def main(exp, args):
             "optimizer": optimizer.state_dict(),
             "epoch": epoch + 1,
             "args": vars(args),
+            "model_config": {
+                "pgc_hidden_dim": args.pgc_hidden_dim,
+                "pgc_num_layers": args.pgc_num_layers,
+                "pgc_num_heads": args.pgc_num_heads,
+                "pgc_memory_len": args.pgc_memory_len,
+                "pgc_k_max": args.pgc_k_max,
+            },
         }
         if (epoch + 1) % args.save_interval == 0:
             torch.save(ckpt, os.path.join(out_dir, "latest_pgc_ckpt.pth.tar"))
