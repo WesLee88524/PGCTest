@@ -165,6 +165,9 @@ class Predictor(object):
         img = torch.from_numpy(img).unsqueeze(0).float().to(self.device)
         if self.fp16:
             img = img.half()
+            self.model = self.model.half()
+        else:
+            self.model = self.model.float()
 
         with torch.no_grad():
             outputs = self.model(img)
@@ -394,6 +397,10 @@ def main(exp, args):
 
     decoder = None
     trt_file = None
+    if args.fp16:
+        model = model.half()
+    else:
+        model = model.float()
     predictor = Predictor(model, exp, trt_file=trt_file, decoder=decoder, device=args.device, fp16=args.fp16)
 
     save_folder = args.pair_vis_dir or vis_folder
