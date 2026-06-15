@@ -18,6 +18,21 @@ from yolox.utils import fuse_model, get_model_info, postprocess
 IMAGE_EXT = [".jpg", ".jpeg", ".webp", ".bmp", ".png"]
 
 
+def _build_color_palette(num_colors=100):
+    palette = []
+    golden = 0.61803398875
+    for idx in range(num_colors):
+        hue = (idx * golden) % 1.0
+        sat = 0.65 + 0.25 * ((idx % 5) / 4.0)
+        val = 0.85 + 0.10 * (((idx // 5) % 5) / 4.0)
+        rgb = colorsys.hsv_to_rgb(hue, min(0.95, sat), min(0.98, val))
+        palette.append(tuple(int(c * 255) for c in rgb[::-1]))
+    return palette
+
+
+COLOR_PALETTE = _build_color_palette(100)
+
+
 def get_image_list(path):
     image_names = []
     for maindir, subdir, file_name_list in os.walk(path):
@@ -34,10 +49,8 @@ def _tlwh_to_tlbr(tlwh):
     return np.asarray([tlwh[0], tlwh[1], tlwh[0] + tlwh[2], tlwh[1] + tlwh[3]], dtype=float)
 
 
-def _color_for_id(idx, group_saturation=0.85, group_value=0.95):
-    hue = ((idx * 0.61803398875) % 1.0)
-    rgb = colorsys.hsv_to_rgb(hue, group_saturation, group_value)
-    return tuple(int(c * 255) for c in rgb[::-1])  # BGR
+def _color_for_id(idx):
+    return COLOR_PALETTE[int(idx) % len(COLOR_PALETTE)]
 
 
 def _blend_color(color, alpha=0.85):
@@ -285,7 +298,64 @@ def _draw_group_overlay(image, tracker, groups, group_colors):
 
     header = f"pair groups: {len(groups)}"
     cv2.putText(canvas, header, (18, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (30, 30, 30), 2, cv2.LINE_AA)
+    _draw_group_legend(canvas, groups, group_colors)
     return canvas
+
+
+def _draw_group_legend(image, groups, group_colors, max_rows=12):
+    if not groups:
+        return
+
+    legend_items = []
+    for gid in sorted(groups.keys()):
+        tids = groups[gid]
+        if len(tids) == 0:
+            continue
+        legend_items.append((gid, tids))
+
+    if not legend_items:
+        return
+
+    h, w = image.shape[:2]
+    row_h = 22
+    box_w = 16
+    pad = 10
+    panel_w = min(360, max(220, w // 3))
+    panel_h = min(h - 20, pad * 2 + row_h * min(len(legend_items), max_rows) + 22)
+    x0 = max(10, w - panel_w - 10)
+    y0 = 10
+    x1 = min(w - 10, x0 + panel_w)
+    y1 = min(h - 10, y0 + panel_h)
+
+    overlay = image.copy()
+    cv2.rectangle(overlay, (x0, y0), (x1, y1), (245, 245, 245), -1)
+    cv2.addWeighted(overlay, 0.72, image, 0.28, 0, image)
+    cv2.rectangle(image, (x0, y0), (x1, y1), (70, 70, 70), 1, cv2.LINE_AA)
+    cv2.putText(image, "group -> track ids", (x0 + 10, y0 + 20), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (25, 25, 25), 1, cv2.LINE_AA)
+
+    visible_items = legend_items[:max_rows]
+    for row_idx, (gid, tids) in enumerate(visible_items):
+        y = y0 + 38 + row_idx * row_h
+        color = group_colors.get(gid, (0, 255, 255))
+        cv2.rectangle(image, (x0 + 10, y - 12), (x0 + 10 + box_w, y + 2), color, -1, cv2.LINE_AA)
+        tids_text = ",".join(str(tid) for tid in tids[:8])
+        if len(tids) > 8:
+            tids_text += ",..."
+        text = f"g{gid}: {tids_text}"
+        cv2.putText(image, text, (x0 + 34, y), cv2.FONT_HERSHEY_SIMPLEX, 0.48, (35, 35, 35), 1, cv2.LINE_AA)
+
+    if len(legend_items) > max_rows:
+        more = len(legend_items) - max_rows
+        cv2.putText(
+            image,
+            f"+ {more} more groups",
+            (x0 + 10, y1 - 10),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.48,
+            (60, 60, 60),
+            1,
+            cv2.LINE_AA,
+        )
 
 
 def run_image_sequence(predictor, args, exp, save_folder):
