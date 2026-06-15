@@ -108,6 +108,17 @@ def make_parser():
     parser.add_argument("--match_thresh", type=float, default=0.9, help="matching threshold for tracking")
     parser.add_argument("--min-box-area", type=float, default=100, help='filter out tiny boxes')
     parser.add_argument("--mot20", dest="mot20", default=False, action="store_true", help="test mot20.")
+    parser.add_argument("--use_pgc", dest="use_pgc", default=True, action="store_true", help="enable pair modeling context.")
+    parser.add_argument("--no_pgc", dest="use_pgc", action="store_false", help="disable pair modeling context.")
+    parser.add_argument("--use_pgc_pair", dest="use_pgc_pair", default=True, action="store_true", help="enable pair affinity/lifecycle modeling.")
+    parser.add_argument("--no_pgc_pair", dest="use_pgc_pair", action="store_false", help="disable pair affinity/lifecycle modeling.")
+    parser.add_argument("--use_pgc_delta", dest="use_pgc_delta", default=True, action="store_true", help="enable learned Kalman delta box refinement.")
+    parser.add_argument("--no_pgc_delta", dest="use_pgc_delta", action="store_false", help="disable learned Kalman delta box refinement.")
+    parser.add_argument("--use_pgc_virtual", dest="use_pgc_virtual", default=False, action="store_true", help="enable virtual maintenance from PGC predictions.")
+    parser.add_argument("--allow_pgc_virtual_output", dest="allow_pgc_virtual_output", default=False, action="store_true", help="allow virtual maintained tracks to stay output-visible.")
+    parser.add_argument("--no_pgc_low_relax", dest="use_pgc_low_relax", action="store_false", help="disable low confidence association relaxation.")
+    parser.add_argument("--no_pgc_pred_assoc", dest="use_pgc_pred_assoc", action="store_false", help="disable association cost computed from PGC-predicted boxes.")
+    parser.add_argument("--pgc_ckpt", type=str, default=None, help="checkpoint for the learned PGC delta model.")
     return parser
 
 

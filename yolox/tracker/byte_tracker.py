@@ -9,6 +9,10 @@ import torch.nn.functional as F
 from .kalman_filter import KalmanFilter
 from yolox.tracker import matching
 from .basetrack import BaseTrack, TrackState
+from .pgc_tracker import PGCRelationManager
+
+if not hasattr(np, "float"):
+    np.float = float
 
 class STrack(BaseTrack):
     shared_kalman = KalmanFilter()
@@ -22,12 +26,22 @@ class STrack(BaseTrack):
 
         self.score = score
         self.tracklet_len = 0
+        self.time_since_update = 0
+        self.virtual_update_count = 0
+        self.pgc_reliability = 0.0
+        self.pgc_group_reliability = 0.0
+        self.pgc_occlusion = 0.0
+        self.pgc_existence = 0.0
+        self.pgc_pred_tlwh = self._tlwh.copy()
+        self.pgc_detection_confirmed = False
+        self.pgc_assoc_consistency = 1.0
 
     def predict(self):
         mean_state = self.mean.copy()
         if self.state != TrackState.Tracked:
             mean_state[7] = 0
         self.mean, self.covariance = self.kalman_filter.predict(mean_state, self.covariance)
+        self.time_since_update += 1
 
     @staticmethod
     def multi_predict(stracks):
@@ -41,6 +55,7 @@ class STrack(BaseTrack):
             for i, (mean, cov) in enumerate(zip(multi_mean, multi_covariance)):
                 stracks[i].mean = mean
                 stracks[i].covariance = cov
+                stracks[i].time_since_update += 1
 
     def activate(self, kalman_filter, frame_id):
         """Start a new tracklet"""
@@ -49,24 +64,33 @@ class STrack(BaseTrack):
         self.mean, self.covariance = self.kalman_filter.initiate(self.tlwh_to_xyah(self._tlwh))
 
         self.tracklet_len = 0
+        self.time_since_update = 0
+        self.virtual_update_count = 0
         self.state = TrackState.Tracked
         if frame_id == 1:
             self.is_activated = True
         # self.is_activated = True
         self.frame_id = frame_id
         self.start_frame = frame_id
+        self.pgc_detection_confirmed = True
+        self.pgc_assoc_consistency = 1.0
 
     def re_activate(self, new_track, frame_id, new_id=False):
+        self._update_pgc_association_consistency(new_track.tlwh)
         self.mean, self.covariance = self.kalman_filter.update(
             self.mean, self.covariance, self.tlwh_to_xyah(new_track.tlwh)
         )
         self.tracklet_len = 0
+        self.time_since_update = 0
+        self.virtual_update_count = 0
         self.state = TrackState.Tracked
         self.is_activated = True
         self.frame_id = frame_id
         if new_id:
             self.track_id = self.next_id()
         self.score = new_track.score
+        self.pgc_detection_confirmed = True
+        self.pgc_assoc_consistency = 1.0
 
     def update(self, new_track, frame_id):
         """
@@ -78,14 +102,48 @@ class STrack(BaseTrack):
         """
         self.frame_id = frame_id
         self.tracklet_len += 1
+        self.time_since_update = 0
+        self.virtual_update_count = 0
 
         new_tlwh = new_track.tlwh
+        self._update_pgc_association_consistency(new_tlwh)
         self.mean, self.covariance = self.kalman_filter.update(
             self.mean, self.covariance, self.tlwh_to_xyah(new_tlwh))
         self.state = TrackState.Tracked
         self.is_activated = True
 
         self.score = new_track.score
+        self.pgc_detection_confirmed = True
+
+    def virtual_update(self, pred_tlwh, frame_id, score):
+        """Keep a track alive with a learned or heuristic PGC correction."""
+        self.frame_id = frame_id
+        self.tracklet_len += 1
+        self.virtual_update_count += 1
+        self.time_since_update = 0
+        self.mean, self.covariance = self.kalman_filter.update(
+            self.mean, self.covariance, self.tlwh_to_xyah(pred_tlwh)
+        )
+        self.state = TrackState.Tracked
+        self.is_activated = True
+        self.score = min(float(self.score), float(score))
+        self.pgc_detection_confirmed = False
+        self.pgc_assoc_consistency = 0.0
+
+    def mark_pgc_unmatched(self):
+        self.pgc_detection_confirmed = False
+        self.pgc_assoc_consistency = float(np.clip(0.5 * self.pgc_assoc_consistency, 0.0, 1.0))
+
+    def _update_pgc_association_consistency(self, det_tlwh):
+        pred_tlwh = np.asarray(getattr(self, "pgc_pred_tlwh", self.tlwh), dtype=float)
+        det_tlwh = np.asarray(det_tlwh, dtype=float)
+        pred_center = pred_tlwh[:2] + 0.5 * pred_tlwh[2:]
+        det_center = det_tlwh[:2] + 0.5 * det_tlwh[2:]
+        norm = 0.5 * (pred_tlwh[3] + det_tlwh[3]) + 1e-6
+        dist_score = np.exp(-np.linalg.norm(pred_center - det_center) / norm)
+        iou = matching.ious([self.tlwh_to_tlbr(pred_tlwh)], [self.tlwh_to_tlbr(det_tlwh)])
+        iou_score = float(iou[0, 0]) if iou.size else 0.0
+        self.pgc_assoc_consistency = float(np.clip(0.5 * dist_score + 0.5 * iou_score, 0.0, 1.0))
 
     @property
     # @jit(nopython=True)
@@ -155,6 +213,22 @@ class BYTETracker(object):
         self.buffer_size = int(frame_rate / 30.0 * args.track_buffer)
         self.max_time_lost = self.buffer_size
         self.kalman_filter = KalmanFilter()
+        self.use_pgc = bool(getattr(args, "use_pgc", True))
+        self.use_pgc_pair = bool(getattr(args, "use_pgc_pair", True))
+        self.use_pgc_delta = bool(getattr(args, "use_pgc_delta", True))
+        self.use_pgc_virtual = bool(getattr(args, "use_pgc_virtual", False))
+        self.use_pgc_low_relax = bool(getattr(args, "use_pgc_low_relax", True))
+        self.use_pgc_pred_assoc = bool(getattr(args, "use_pgc_pred_assoc", True))
+        self.pgc_low_beta = getattr(args, "pgc_low_beta", 0.35)
+        self.pgc_virtual_occ_thresh = getattr(args, "pgc_virtual_occ_thresh", 0.55)
+        self.pgc_virtual_rel_thresh = getattr(args, "pgc_virtual_rel_thresh", 0.35)
+        self.pgc_virtual_assoc_thresh = getattr(args, "pgc_virtual_assoc_thresh", 0.20)
+        pgc_virtual_max = getattr(args, "pgc_virtual_max", None)
+        if pgc_virtual_max is None:
+            pgc_virtual_max = min(12, self.max_time_lost)
+        self.pgc_virtual_max = int(pgc_virtual_max)
+        self.allow_pgc_virtual_output = bool(getattr(args, "allow_pgc_virtual_output", False))
+        self.pgc = PGCRelationManager(args) if self.use_pgc else None
 
     def update(self, output_results, img_info, img_size):
         self.frame_id += 1
@@ -204,7 +278,9 @@ class BYTETracker(object):
         strack_pool = joint_stracks(tracked_stracks, self.lost_stracks)
         # Predict the current location with KF
         STrack.multi_predict(strack_pool)
-        dists = matching.iou_distance(strack_pool, detections)
+        if self.use_pgc and self.use_pgc_pair and self.pgc is not None:
+            self.pgc.update(strack_pool, self.frame_id, img_info)
+        dists = self._association_distance(strack_pool, detections)
         if not self.args.mot20:
             dists = matching.fuse_score(dists, detections)
         matches, u_track, u_detection = matching.linear_assignment(dists, thresh=self.args.match_thresh)
@@ -228,7 +304,9 @@ class BYTETracker(object):
         else:
             detections_second = []
         r_tracked_stracks = [strack_pool[i] for i in u_track if strack_pool[i].state == TrackState.Tracked]
-        dists = matching.iou_distance(r_tracked_stracks, detections_second)
+        dists = self._association_distance(r_tracked_stracks, detections_second)
+        if self.use_pgc and self.use_pgc_pair and self.use_pgc_low_relax:
+            dists = self._apply_pgc_low_conf_relaxation(dists, r_tracked_stracks)
         matches, u_track, u_detection_second = matching.linear_assignment(dists, thresh=0.5)
         for itracked, idet in matches:
             track = r_tracked_stracks[itracked]
@@ -242,6 +320,17 @@ class BYTETracker(object):
 
         for it in u_track:
             track = r_tracked_stracks[it]
+            if self.use_pgc and self.use_pgc_pair:
+                track.mark_pgc_unmatched()
+            if (
+                self.use_pgc
+                and self.use_pgc_pair
+                and self.use_pgc_virtual
+                and self.allow_pgc_virtual_output
+                and self._pgc_virtual_maintenance(track)
+            ):
+                activated_starcks.append(track)
+                continue
             if not track.state == TrackState.Lost:
                 track.mark_lost()
                 lost_stracks.append(track)
@@ -287,6 +376,54 @@ class BYTETracker(object):
         output_stracks = [track for track in self.tracked_stracks if track.is_activated]
 
         return output_stracks
+
+    def _association_distance(self, tracks, detections):
+        if len(tracks) == 0 or len(detections) == 0:
+            return np.zeros((len(tracks), len(detections)), dtype=float)
+        if self.use_pgc and self.use_pgc_pair and self.use_pgc_delta and self.use_pgc_pred_assoc:
+            track_tlwhs = [getattr(track, "pgc_pred_tlwh", track.tlwh) for track in tracks]
+            track_tlbrs = [STrack.tlwh_to_tlbr(tlwh) for tlwh in track_tlwhs]
+            det_tlbrs = [det.tlbr for det in detections]
+            iou_cost = 1.0 - matching.ious(track_tlbrs, det_tlbrs)
+            center_cost = self._normalized_center_distance(track_tlwhs, [det.tlwh for det in detections])
+            return 0.82 * iou_cost + 0.18 * center_cost
+        return matching.iou_distance(tracks, detections)
+
+    @staticmethod
+    def _normalized_center_distance(track_tlwhs, det_tlwhs):
+        cost = np.zeros((len(track_tlwhs), len(det_tlwhs)), dtype=float)
+        for i, track_tlwh in enumerate(track_tlwhs):
+            track_center = np.asarray([track_tlwh[0] + 0.5 * track_tlwh[2], track_tlwh[1] + 0.5 * track_tlwh[3]])
+            for j, det_tlwh in enumerate(det_tlwhs):
+                det_center = np.asarray([det_tlwh[0] + 0.5 * det_tlwh[2], det_tlwh[1] + 0.5 * det_tlwh[3]])
+                norm = 0.5 * (track_tlwh[3] + det_tlwh[3]) + 1e-6
+                cost[i, j] = min(1.0, np.linalg.norm(track_center - det_center) / norm)
+        return cost
+
+    def _apply_pgc_low_conf_relaxation(self, cost_matrix, tracks):
+        if cost_matrix.size == 0:
+            return cost_matrix
+        relaxed = cost_matrix.copy()
+        for row, track in enumerate(tracks):
+            factor = 1.0 - float(self.pgc_low_beta) * float(getattr(track, "pgc_occlusion", 0.0)) * float(
+                getattr(track, "pgc_group_reliability", 0.0)
+            )
+            relaxed[row] *= np.clip(factor, 0.55, 1.0)
+        return relaxed
+
+    def _pgc_virtual_maintenance(self, track):
+        if track.virtual_update_count >= self.pgc_virtual_max:
+            return False
+        if track.pgc_occlusion <= self.pgc_virtual_occ_thresh:
+            return False
+        if track.pgc_group_reliability <= self.pgc_virtual_rel_thresh:
+            return False
+        if track.pgc_assoc_consistency <= self.pgc_virtual_assoc_thresh:
+            return False
+        decay = np.exp(-(track.virtual_update_count + 1) / float(max(1, self.pgc_virtual_max)))
+        virtual_score = track.pgc_existence * track.pgc_occlusion * track.pgc_group_reliability * decay
+        track.virtual_update(track.pgc_pred_tlwh, self.frame_id, virtual_score)
+        return True
 
 
 def joint_stracks(tlista, tlistb):
