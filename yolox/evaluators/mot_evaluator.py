@@ -127,6 +127,7 @@ class MOTEvaluator:
             
         tracker = BYTETracker(self.args)
         ori_thresh = self.args.track_thresh
+        prev_video_name = None
         for cur_iter, (imgs, _, info_imgs, ids) in enumerate(
             progress_bar(self.dataloader)
         ):
@@ -161,9 +162,10 @@ class MOTEvaluator:
                 if frame_id == 1:
                     tracker = BYTETracker(self.args)
                     if len(results) != 0:
-                        result_filename = os.path.join(result_folder, '{}.txt'.format(video_names[video_id - 1]))
+                        result_filename = os.path.join(result_folder, '{}.txt'.format(prev_video_name))
                         write_results(result_filename, results)
                         results = []
+                    prev_video_name = video_name
 
                 imgs = imgs.type(tensor_type)
 
@@ -270,6 +272,7 @@ class MOTEvaluator:
             model = model_trt
             
         tracker = Sort(self.args.track_thresh)
+        prev_video_name = None
         
         for cur_iter, (imgs, _, info_imgs, ids) in enumerate(
             progress_bar(self.dataloader)
@@ -286,9 +289,10 @@ class MOTEvaluator:
                 if frame_id == 1:
                     tracker = Sort(self.args.track_thresh)
                     if len(results) != 0:
-                        result_filename = os.path.join(result_folder, '{}.txt'.format(video_names[video_id - 1]))
+                        result_filename = os.path.join(result_folder, '{}.txt'.format(prev_video_name))
                         write_results_no_score(result_filename, results)
                         results = []
+                    prev_video_name = video_name
 
                 imgs = imgs.type(tensor_type)
 
@@ -393,6 +397,7 @@ class MOTEvaluator:
             model = model_trt
             
         tracker = DeepSort(model_folder, min_confidence=self.args.track_thresh)
+        prev_video_name = None
         
         for cur_iter, (imgs, _, info_imgs, ids) in enumerate(
             progress_bar(self.dataloader)
@@ -409,9 +414,10 @@ class MOTEvaluator:
                 if frame_id == 1:
                     tracker = DeepSort(model_folder, min_confidence=self.args.track_thresh)
                     if len(results) != 0:
-                        result_filename = os.path.join(result_folder, '{}.txt'.format(video_names[video_id - 1]))
+                        result_filename = os.path.join(result_folder, '{}.txt'.format(prev_video_name))
                         write_results_no_score(result_filename, results)
                         results = []
+                    prev_video_name = video_name
 
                 imgs = imgs.type(tensor_type)
 
@@ -516,6 +522,7 @@ class MOTEvaluator:
             model = model_trt
             
         tracker = OnlineTracker(model_folder, min_cls_score=self.args.track_thresh)
+        prev_video_name = None
         for cur_iter, (imgs, _, info_imgs, ids) in enumerate(
             progress_bar(self.dataloader)
         ):
@@ -531,9 +538,10 @@ class MOTEvaluator:
                 if frame_id == 1:
                     tracker = OnlineTracker(model_folder, min_cls_score=self.args.track_thresh)
                     if len(results) != 0:
-                        result_filename = os.path.join(result_folder, '{}.txt'.format(video_names[video_id - 1]))
+                        result_filename = os.path.join(result_folder, '{}.txt'.format(prev_video_name))
                         write_results(result_filename, results)
                         results = []
+                    prev_video_name = video_name
 
                 imgs = imgs.type(tensor_type)
 
