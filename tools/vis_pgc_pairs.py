@@ -83,7 +83,9 @@ class PGCVisualTracker(BYTETracker):
     def __init__(self, args, frame_rate=30):
         super().__init__(args, frame_rate=frame_rate)
         self.track_history = {}
-        self.pair_group_cache = {}
+        self.stable_pair_groups = {}
+        self.prev_pair_groups = {}
+        self.next_pair_gid = 0
 
     def update(self, output_results, img_info, img_size):
         online_targets = super().update(output_results, img_info, img_size)
@@ -106,25 +108,81 @@ class PGCVisualTracker(BYTETracker):
                 self.track_history[tid] = self.track_history[tid][-30:]
 
     def _refresh_pair_groups(self):
-        self.pair_group_cache = {}
+        self.stable_pair_groups = self._build_stable_pair_groups()
+
+    def _build_stable_pair_groups(self):
         if not getattr(self, "pgc", None):
+            self.prev_pair_groups = {}
             return
-        group_id = 0
-        for key, state in getattr(self.pgc, "pairs", {}).items():
+        pairs = getattr(self.pgc, "pairs", {})
+        graph = {}
+        for (tid_a, tid_b), state in pairs.items():
             if state.state not in ("A", "W"):
                 continue
-            tid_a, tid_b = key
-            self.pair_group_cache.setdefault(tid_a, set()).add(group_id)
-            self.pair_group_cache.setdefault(tid_b, set()).add(group_id)
-            group_id += 1
+            graph.setdefault(tid_a, set()).add(tid_b)
+            graph.setdefault(tid_b, set()).add(tid_a)
+
+        current_components = []
+        visited = set()
+        for node in graph:
+            if node in visited:
+                continue
+            stack = [node]
+            comp = set()
+            while stack:
+                u = stack.pop()
+                if u in visited:
+                    continue
+                visited.add(u)
+                comp.add(u)
+                for v in graph.get(u, []):
+                    if v not in visited:
+                        stack.append(v)
+            if len(comp) >= self.args.pair_min_count:
+                current_components.append(comp)
+
+        prev_groups = {gid: set(tids) for gid, tids in self.prev_pair_groups.items()}
+        unused_prev = set(prev_groups.keys())
+        stable_groups = {}
+
+        for comp in sorted(current_components, key=lambda x: (-len(x), sorted(list(x))[0])):
+            best_gid = None
+            best_overlap = 0
+            best_jaccard = 0.0
+            for gid in list(unused_prev):
+                prev_set = prev_groups[gid]
+                inter = len(comp & prev_set)
+                if inter == 0:
+                    continue
+                union = len(comp | prev_set)
+                jaccard = inter / float(max(1, union))
+                if inter > best_overlap or (inter == best_overlap and jaccard > best_jaccard):
+                    best_gid = gid
+                    best_overlap = inter
+                    best_jaccard = jaccard
+            if best_gid is None:
+                best_gid = self.next_pair_gid
+                self.next_pair_gid += 1
+            else:
+                unused_prev.discard(best_gid)
+            stable_groups[best_gid] = sorted(list(comp))
+
+        self.prev_pair_groups = stable_groups
+        return stable_groups
 
     def get_frame_groups(self):
         groups = {}
+        track_to_group = {}
+        for gid, tids in self.stable_pair_groups.items():
+            for tid in tids:
+                track_to_group.setdefault(tid, []).append(gid)
         for track in list(self.tracked_stracks) + list(self.lost_stracks):
             tid = track.track_id
-            group_ids = sorted(list(self.pair_group_cache.get(tid, [])))
-            groups[tid] = group_ids
+            groups[tid] = sorted(track_to_group.get(tid, []))
         return groups
+
+    def get_stable_pair_groups(self):
+        return {gid: list(tids) for gid, tids in self.stable_pair_groups.items()}
 
     def get_group_pairs(self):
         pairs = []
@@ -231,41 +289,6 @@ def _normalize_frame_size(img_info, img_size):
     img_h, img_w = img_info["height"], img_info["width"]
     scale = min(img_size[0] / float(img_h), img_size[1] / float(img_w))
     return scale
-
-
-def _collect_pair_groups(tracker):
-    pair_groups = {}
-    if not getattr(tracker, "pgc", None):
-        return pair_groups
-
-    pairs = tracker.pgc.pairs
-    graph = {}
-    for (tid_a, tid_b), state in pairs.items():
-        if state.state not in ("A", "W"):
-            continue
-        graph.setdefault(tid_a, set()).add(tid_b)
-        graph.setdefault(tid_b, set()).add(tid_a)
-
-    visited = set()
-    gid = 0
-    for node in graph:
-        if node in visited:
-            continue
-        stack = [node]
-        comp = set()
-        while stack:
-            u = stack.pop()
-            if u in visited:
-                continue
-            visited.add(u)
-            comp.add(u)
-            for v in graph.get(u, []):
-                if v not in visited:
-                    stack.append(v)
-        if len(comp) >= 2:
-            pair_groups[gid] = sorted(list(comp))
-            gid += 1
-    return pair_groups
 
 
 def _assign_group_colors(pair_groups):
@@ -396,7 +419,7 @@ def run_image_sequence(predictor, args, exp, save_folder):
                     results.append(
                         f"{frame_id},{tid},{tlwh[0]:.2f},{tlwh[1]:.2f},{tlwh[2]:.2f},{tlwh[3]:.2f},{t.score:.2f},-1,-1,-1\n"
                     )
-        groups = _collect_pair_groups(tracker)
+        groups = tracker.get_stable_pair_groups()
         groups = _filter_groups(groups, show_only_gid=args.show_only_gid, min_count=args.pair_min_count)
         colors = _assign_group_colors(groups)
         vis_img = _draw_group_overlay(raw_img, tracker, groups, colors)
@@ -430,7 +453,7 @@ def run_video_sequence(predictor, args, exp, save_folder):
         outputs, img_info = predictor.inference(frame)
         if outputs[0] is not None:
             tracker.update(outputs[0], [img_info["height"], img_info["width"]], exp.test_size)
-        groups = _collect_pair_groups(tracker)
+        groups = tracker.get_stable_pair_groups()
         groups = _filter_groups(groups, show_only_gid=args.show_only_gid, min_count=args.pair_min_count)
         colors = _assign_group_colors(groups)
         vis_img = _draw_group_overlay(img_info["raw_img"], tracker, groups, colors)
