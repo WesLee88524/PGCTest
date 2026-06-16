@@ -328,6 +328,7 @@ def make_parser():
     parser.add_argument("-f", "--exp_file", default=None, type=str)
     parser.add_argument("--data_dir", default=None, type=str, help="dataset directory relative to yolox datadir")
     parser.add_argument("--train_json", default=None, type=str, help="train annotation json")
+    parser.add_argument("--val_json", default=None, type=str, help="validation annotation json")
     parser.add_argument("--fp16", dest="fp16", default=False, action="store_true")
     parser.add_argument("--resume", action="store_true", default=False)
     parser.add_argument("-c", "--ckpt", default=None, type=str)
@@ -341,7 +342,8 @@ def make_parser():
     parser.add_argument("--workers", type=int, default=4)
     parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--weight_decay", type=float, default=1e-4)
-    parser.add_argument("--save_interval", type=int, default=1)
+    parser.add_argument("--save_interval", type=int, default=5)
+    parser.add_argument("--eval_interval", type=int, default=5)
     parser.add_argument("--max_samples", type=int, default=0, help="limit samples for quick debugging")
     parser.add_argument("--pgc_hidden_dim", type=int, default=128)
     parser.add_argument("--pgc_num_layers", type=int, default=2)
@@ -367,6 +369,7 @@ def main(exp, args):
     data_root = args.data_dir or "mix_mot_ch"
     data_root = data_root if os.path.isabs(data_root) else os.path.join(get_yolox_datadir(), data_root)
     train_json = args.train_json or getattr(exp, "train_ann", "train.json")
+    val_json = args.val_json or getattr(exp, "val_ann", "val_half.json")
     input_size = getattr(exp, "input_size", (800, 1440))
     max_epoch = args.epochs or getattr(exp, "max_epoch", 80)
 
@@ -398,6 +401,31 @@ def main(exp, args):
         drop_last=True,
     )
 
+    val_dataset = MOTDataset(
+        data_dir=data_root,
+        json_file=val_json,
+        name="val" if "mix_mot" in data_root or "mot" in data_root else "",
+        img_size=input_size,
+        preproc=None,
+    )
+    val_pgc_dataset = PGCMOTPairDataset(
+        val_dataset,
+        input_size=input_size,
+        memory_len=args.pgc_memory_len,
+        k_max=args.pgc_k_max,
+        pair_radius=args.pgc_pair_radius,
+        occ_iou_thresh=args.pgc_occ_iou_thresh,
+    )
+    val_loader = DataLoader(
+        val_pgc_dataset,
+        batch_size=args.batch_size,
+        shuffle=False,
+        num_workers=args.workers,
+        pin_memory=True,
+        collate_fn=collate_pgc,
+        drop_last=False,
+    )
+
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = PGCTrackNet(
         hidden_dim=args.pgc_hidden_dim,
@@ -420,6 +448,46 @@ def main(exp, args):
     out_dir = args.save_dir or os.path.join(exp.output_dir, args.experiment_name or exp.exp_name)
     os.makedirs(out_dir, exist_ok=True)
     logger.info("Training PGC model on {} samples".format(len(pgc_dataset)))
+    logger.info("Validation PGC model on {} samples".format(len(val_pgc_dataset)))
+
+    def evaluate(model, val_loader, device):
+        model.eval()
+        val_meters = {"total": 0.0, "motion": 0.0, "occlusion": 0.0, "existence": 0.0, "pair": 0.0}
+        val_count = 0
+        with torch.no_grad():
+            for batch in val_loader:
+                target_feat = batch["target_feat"].to(device)
+                pair_seq = batch["pair_seq"].to(device)
+                pair_token_mask = batch["pair_token_mask"].to(device)
+                pair_affinity = batch["pair_affinity"].to(device)
+                pair_mask = batch["pair_mask"].to(device)
+                labels = {k: v.to(device) for k, v in batch["labels"].items()}
+
+                with torch.cuda.amp.autocast(enabled=args.fp16):
+                    outputs = model(target_feat, pair_seq, pair_token_mask, pair_affinity, pair_mask)
+                    loss_dict = pgc_loss(
+                        outputs,
+                        labels,
+                        weights={
+                            "motion": args.pgc_motion_weight,
+                            "occ": args.pgc_occ_weight,
+                            "pair": args.pgc_pair_weight,
+                            "existence": args.pgc_existence_weight,
+                        },
+                    )
+                    loss = loss_dict["total"]
+
+                val_meters["total"] += float(loss.detach().cpu())
+                val_meters["motion"] += float(loss_dict["motion"].cpu())
+                val_meters["occlusion"] += float(loss_dict["occlusion"].cpu())
+                val_meters["existence"] += float(loss_dict["existence"].cpu())
+                val_meters["pair"] += float(loss_dict["pair"].cpu())
+                val_count += 1
+
+        for key in val_meters:
+            val_meters[key] /= max(val_count, 1)
+        model.train()
+        return val_meters
 
     global_step = 0
     for epoch in range(start_epoch, max_epoch):
@@ -489,8 +557,25 @@ def main(exp, args):
             },
         }
         if (epoch + 1) % args.save_interval == 0:
-            torch.save(ckpt, os.path.join(out_dir, "latest_pgc_ckpt.pth.tar"))
+            ckpt_path = os.path.join(out_dir, f"pgc_ckpt_epoch_{epoch + 1}.pth.tar")
+            torch.save(ckpt, ckpt_path)
+            logger.info("checkpoint saved to {}".format(ckpt_path))
         torch.save(ckpt, os.path.join(out_dir, "last_pgc_ckpt.pth.tar"))
+
+        if (epoch + 1) % args.eval_interval == 0:
+            logger.info("Evaluating on validation set...")
+            val_meters = evaluate(model, val_loader, device)
+            logger.info(
+                "epoch {} val loss {:.4f} motion {:.4f} occ {:.4f} exist {:.4f} pair {:.4f}".format(
+                    epoch + 1,
+                    val_meters["total"],
+                    val_meters["motion"],
+                    val_meters["occlusion"],
+                    val_meters["existence"],
+                    val_meters["pair"],
+                )
+            )
+
         logger.info("epoch {} done in {:.1f}s".format(epoch + 1, time.time() - t0))
 
     logger.info("training finished, checkpoints saved to {}".format(out_dir))
