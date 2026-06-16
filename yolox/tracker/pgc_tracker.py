@@ -160,8 +160,8 @@ class PGCRelationManager(object):
         h_ref = 100.0 
         
         # 3. 计算动态距离调节因子（近处大目标 > 1, 远处小目标 < 1）
-        # 使用 np.clip 避免极端大目标导致惩罚过度，或极小目标导致惩罚彻底失效
-        gamma_dist = np.clip(mean_h / h_ref, 0.5, 2.0)
+        # 修正：小目标容忍度更低，gamma更大，要求更严
+        gamma_dist = np.clip(2.0 - mean_h / h_ref, 0.5, 2.0)
         
         # 4. 用加权欧氏距离计算原本的距离（这里结合了上一轮关于垂直距离的优化）
         spatial_weights = np.array([0.3, 0.7])
@@ -180,9 +180,9 @@ class PGCRelationManager(object):
         #     -abs(np.log((tlwh_i[3] + eps) / (tlwh_j[3] + eps)))
         #     -abs(np.log((tlwh_i[2] + eps) / (tlwh_j[2] + eps)))
         # )
-        # 1. 计算动态尺度调节因子：目标越小，这个值越接近 0，从而抹平小目标的剧烈抖动
-        # 当 mean_h 远小于 h_ref 时，gamma_scale 变小
-        gamma_scale = np.clip(mean_h / h_ref, 0.3, 1.0)
+        # 1. 计算动态尺度调节因子：目标越小，惩罚越重
+        # 修正：小目标 gamma_scale 更大，尺度差异惩罚更重
+        gamma_scale = np.clip(1.0 - mean_h / h_ref * 0.7, 0.3, 1.0)
         
         # 2. 在计算对数差异时，乘上这个调节因子
         log_h_diff = abs(np.log((tlwh_i[3] + eps) / (tlwh_j[3] + eps))) * gamma_scale
@@ -209,8 +209,8 @@ class PGCRelationManager(object):
             + self.lambda_motion * motion_aff
             + self.lambda_quality * quality_aff
         )
-        # 如果空间距离太远，或者大小完全不配，直接一票否决
-        if norm_dist > 3.0 or scale_aff < 0.3:
+        # 如果空间距离太远，或者大小完全不配，直接一票否决（更严格的标准）
+        if norm_dist > 2.0 or scale_aff < 0.5:
             return 0.0, float(norm_dist+1e5), motion_cos
         else:
             return float(np.clip(affinity, 0.0, 1.0)), float(norm_dist), motion_cos
@@ -267,8 +267,8 @@ class PGCRelationManager(object):
                 
                 # 在外层循环判断时
                 mean_h = (track_i.tlwh[3] + track_j.tlwh[3]) * 0.5
-                # 目标越小，放宽的倍数越大（最多放宽 1.5 倍搜索范围）
-                dynamic_tau_dist = self.tau_dist * (1.5 - np.clip(mean_h / 100.0, 0.0, 0.5))
+                # 修正：目标越小，搜索范围越窄（收紧小目标的搜索范围）
+                dynamic_tau_dist = self.tau_dist * (0.5 + np.clip(mean_h / 100.0, 0.0, 0.5))
                 
                 if norm_dist < dynamic_tau_dist:
                     # 允许进入后续流程...
