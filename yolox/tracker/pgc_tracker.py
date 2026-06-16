@@ -153,24 +153,43 @@ class PGCRelationManager(object):
 
         bottom_i = self._bottom_center(tlwh_i)
         bottom_j = self._bottom_center(tlwh_j)
-        # 假设 alpha = 2.0 是你给垂直距离加的权重
-        # alpha = 2.0
-        # weighted_diff = (bottom_i - bottom_j) * np.array([1.0, alpha])
-        # norm_dist = np.linalg.norm(weighted_diff) / ((tlwh_i[3] + tlwh_j[3]) * 0.5 + eps)
-        # 假设 x 占 0.3 的权重，y 占 0.7 的权重
+        # 1. 计算平均高度作为“远近”的度量
+        mean_h = (tlwh_i[3] + tlwh_j[3]) * 0.5
+        
+        # 2. 设置参考基准（可根据你的数据集调整，比如 100 像素）
+        h_ref = 100.0 
+        
+        # 3. 计算动态距离调节因子（近处大目标 > 1, 远处小目标 < 1）
+        # 使用 np.clip 避免极端大目标导致惩罚过度，或极小目标导致惩罚彻底失效
+        gamma_dist = np.clip(mean_h / h_ref, 0.5, 2.0)
+        
+        # 4. 用加权欧氏距离计算原本的距离（这里结合了上一轮关于垂直距离的优化）
         spatial_weights = np.array([0.3, 0.7])
         diff_squared = (bottom_i - bottom_j) ** 2
         weighted_dist = np.sqrt(np.sum(spatial_weights * diff_squared))
+        norm_dist = weighted_dist / (mean_h + eps)
+        
+        # 5. 核心修改：近处（gamma大）距离被放大，衰减变快，要求更严
+        #              远处（gamma小）距离被缩小，衰减变慢，容忍度变高
+        dist_aff = np.exp(-norm_dist * gamma_dist)
 
-        # 然后再归一化
-        norm_dist = weighted_dist / ((tlwh_i[3] + tlwh_j[3]) * 0.5 + eps)
         # norm_dist = np.linalg.norm(bottom_i - bottom_j) / ((tlwh_i[3] + tlwh_j[3]) * 0.5 + eps)
-        dist_aff = np.exp(-norm_dist)
+        # dist_aff = np.exp(-norm_dist)
 
-        scale_aff = np.exp(
-            -abs(np.log((tlwh_i[3] + eps) / (tlwh_j[3] + eps)))
-            -abs(np.log((tlwh_i[2] + eps) / (tlwh_j[2] + eps)))
-        )
+        # scale_aff = np.exp(
+        #     -abs(np.log((tlwh_i[3] + eps) / (tlwh_j[3] + eps)))
+        #     -abs(np.log((tlwh_i[2] + eps) / (tlwh_j[2] + eps)))
+        # )
+        # 1. 计算动态尺度调节因子：目标越小，这个值越接近 0，从而抹平小目标的剧烈抖动
+        # 当 mean_h 远小于 h_ref 时，gamma_scale 变小
+        gamma_scale = np.clip(mean_h / h_ref, 0.3, 1.0)
+        
+        # 2. 在计算对数差异时，乘上这个调节因子
+        log_h_diff = abs(np.log((tlwh_i[3] + eps) / (tlwh_j[3] + eps))) * gamma_scale
+        log_w_diff = abs(np.log((tlwh_i[2] + eps) / (tlwh_j[2] + eps))) * gamma_scale
+        
+        scale_aff = np.exp(-log_h_diff - log_w_diff)
+
 
         vel_i = self._velocity(track_i)
         vel_j = self._velocity(track_j)
@@ -245,7 +264,15 @@ class PGCRelationManager(object):
         for i, track_i in enumerate(valid_tracks):
             for track_j in valid_tracks[i + 1:]:
                 affinity, norm_dist, motion_cos = self._affinity_terms(track_i, track_j)
-                if norm_dist < self.tau_dist:
+                
+                # 在外层循环判断时
+                mean_h = (track_i.tlwh[3] + track_j.tlwh[3]) * 0.5
+                # 目标越小，放宽的倍数越大（最多放宽 1.5 倍搜索范围）
+                dynamic_tau_dist = self.tau_dist * (1.5 - np.clip(mean_h / 100.0, 0.0, 0.5))
+                
+                if norm_dist < dynamic_tau_dist:
+                    # 允许进入后续流程...
+                # if norm_dist < self.tau_dist:
                     assoc = self.association_consistency(track_i, track_j)
                     frozen = self.pair_update_frozen(track_i, track_j)
                     candidates.append((track_i, track_j, affinity, norm_dist, motion_cos, assoc, frozen))
