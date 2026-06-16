@@ -153,18 +153,10 @@ class PGCRelationManager(object):
 
         bottom_i = self._bottom_center(tlwh_i)
         bottom_j = self._bottom_center(tlwh_j)
-        # 1. 定义权重，确保相加等于 1（这里让 y 的权重为 0.7，x 的权重为 0.3）
-        # 假设 bottom_i 的格式是 [x, y]
-        spatial_weights = np.array([0.3, 0.7]) 
-
-        # 2. 计算坐标差值的平方
-        diff_squared = (bottom_i - bottom_j) ** 2
-
-        # 3. 对应位相乘并求和，再开方（即加权欧氏距离）
-        weighted_dist = np.sqrt(np.sum(spatial_weights * diff_squared))
-
-        # 4. 原本的归一化流程保持不变
-        norm_dist = weighted_dist / ((tlwh_i[3] + tlwh_j[3]) * 0.5 + eps)
+        # 假设 alpha = 2.0 是你给垂直距离加的权重
+        alpha = 2.0
+        weighted_diff = (bottom_i - bottom_j) * np.array([1.0, alpha])
+        norm_dist = np.linalg.norm(weighted_diff) / ((tlwh_i[3] + tlwh_j[3]) * 0.5 + eps)
         # norm_dist = np.linalg.norm(bottom_i - bottom_j) / ((tlwh_i[3] + tlwh_j[3]) * 0.5 + eps)
         dist_aff = np.exp(-norm_dist)
 
