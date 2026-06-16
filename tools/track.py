@@ -119,6 +119,7 @@ def make_parser():
     parser.add_argument("--no_pgc_low_relax", dest="use_pgc_low_relax", action="store_false", help="disable low confidence association relaxation.")
     parser.add_argument("--no_pgc_pred_assoc", dest="use_pgc_pred_assoc", action="store_false", help="disable association cost computed from PGC-predicted boxes.")
     parser.add_argument("--pgc_ckpt", type=str, default=None, help="checkpoint for the learned PGC delta model.")
+    parser.add_argument("--ningbo_debug", dest="use_ningbo_debug", default=False, action="store_false", help="use ningbo debug.")
     return parser
 
 
@@ -311,6 +312,26 @@ def main(exp, args, num_gpu):
 
 if __name__ == "__main__":
     args = make_parser().parse_args()
+    if args.ningbo_debug == True:
+        # ==================== 手动覆盖/添加实验配置 ====================
+        args.exp_file = "exps/example/mot/yolox_x_mot17_half.py"
+        args.ckpt = "pretrained/bytetrack_ablation.pth.tar"  # 通常长参数 -c 对应的属性名是 ckpt，你可以去 parser 确认一下
+        args.batch_size = 1                                  # 通常 -b 对应 batch_size
+        args.devices = 1                                     # 通常 -d 对应 devices
+
+        # 布尔开关 (Flags)
+        args.fp16 = True
+        args.fuse = True
+        args.use_pgc = True
+        args.use_pgc_pair = True
+        args.use_pgc_delta = True
+        args.no_pgc_pred_assoc = True
+
+        # 实验名称与 PGC 权重路径
+        args.experiment_name = "bytetrack_pgc_pair_delta_train"
+        args.pgc_ckpt = "YOLOX_outputs/pgc_train_smoke_mot17/latest_pgc_ckpt.pth.tar"
+        # =============================================================
+    
     exp = get_exp(args.exp_file, args.name)
     exp.merge(args.opts)
 
