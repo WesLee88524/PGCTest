@@ -154,9 +154,16 @@ class PGCRelationManager(object):
         bottom_i = self._bottom_center(tlwh_i)
         bottom_j = self._bottom_center(tlwh_j)
         # 假设 alpha = 2.0 是你给垂直距离加的权重
-        alpha = 2.0
-        weighted_diff = (bottom_i - bottom_j) * np.array([1.0, alpha])
-        norm_dist = np.linalg.norm(weighted_diff) / ((tlwh_i[3] + tlwh_j[3]) * 0.5 + eps)
+        # alpha = 2.0
+        # weighted_diff = (bottom_i - bottom_j) * np.array([1.0, alpha])
+        # norm_dist = np.linalg.norm(weighted_diff) / ((tlwh_i[3] + tlwh_j[3]) * 0.5 + eps)
+        # 假设 x 占 0.3 的权重，y 占 0.7 的权重
+        spatial_weights = np.array([0.3, 0.7])
+        diff_squared = (bottom_i - bottom_j) ** 2
+        weighted_dist = np.sqrt(np.sum(spatial_weights * diff_squared))
+
+        # 然后再归一化
+        norm_dist = weighted_dist / ((tlwh_i[3] + tlwh_j[3]) * 0.5 + eps)
         # norm_dist = np.linalg.norm(bottom_i - bottom_j) / ((tlwh_i[3] + tlwh_j[3]) * 0.5 + eps)
         dist_aff = np.exp(-norm_dist)
 
@@ -171,13 +178,23 @@ class PGCRelationManager(object):
         motion_aff = 0.5 * (1.0 + np.clip(motion_cos, -1.0, 1.0))
 
         quality_aff = np.sqrt(self.track_reliability(track_i) * self.track_reliability(track_j))
+        # # 1. 空间和尺度是底线，只要有一个不满足，直接归零（或者通过乘法相互约束）
+        # spatial_base = dist_aff * scale_aff 
+
+        # # 2. 运动和质量作为加权调节因子
+        # # 或者干脆全部用连乘（如果某项可能为0，可以加一个基础底分，比如 0.1 * motion_aff + 0.9）
+        # affinity = spatial_base * (self.lambda_motion * motion_aff + self.lambda_quality * quality_aff)
         affinity = (
             self.lambda_dist * dist_aff
             + self.lambda_scale * scale_aff
             + self.lambda_motion * motion_aff
             + self.lambda_quality * quality_aff
         )
-        return float(np.clip(affinity, 0.0, 1.0)), float(norm_dist), motion_cos
+        # 如果空间距离太远，或者大小完全不配，直接一票否决
+        if norm_dist > 3.0 or scale_aff < 0.3:
+            return 0.0, float(norm_dist+1e5), motion_cos
+        else:
+            return float(np.clip(affinity, 0.0, 1.0)), float(norm_dist), motion_cos
 
     def _descriptor(self, track_i, track_j, motion_cos):
         tlwh_i = track_i.tlwh
