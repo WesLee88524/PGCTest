@@ -34,10 +34,10 @@ class PGCRelationManager(object):
     """
 
     def __init__(self, args=None):
-        self.lambda_dist = getattr(args, "pgc_lambda_dist", 0.35)
-        self.lambda_scale = getattr(args, "pgc_lambda_scale", 0.20)
-        self.lambda_motion = getattr(args, "pgc_lambda_motion", 0.20)
-        self.lambda_quality = getattr(args, "pgc_lambda_quality", 0.25)
+        self.lambda_dist = getattr(args, "pgc_lambda_dist", 0.45)
+        self.lambda_scale = getattr(args, "pgc_lambda_scale", 0.30)
+        self.lambda_motion = getattr(args, "pgc_lambda_motion", 0.15)
+        self.lambda_quality = getattr(args, "pgc_lambda_quality", 0.10)
         self.alpha = getattr(args, "pgc_smooth_alpha", 0.60)
         self.tau_dist = getattr(args, "pgc_tau_dist", 4.0)
         self.tau_on = getattr(args, "pgc_tau_on", 0.70)
@@ -198,17 +198,17 @@ class PGCRelationManager(object):
 
         quality_aff = np.sqrt(self.track_reliability(track_i) * self.track_reliability(track_j))
         # # 1. 空间和尺度是底线，只要有一个不满足，直接归零（或者通过乘法相互约束）
-        # spatial_base = dist_aff * scale_aff 
+        spatial_base = dist_aff * scale_aff 
 
         # # 2. 运动和质量作为加权调节因子
         # # 或者干脆全部用连乘（如果某项可能为0，可以加一个基础底分，比如 0.1 * motion_aff + 0.9）
-        # affinity = spatial_base * (self.lambda_motion * motion_aff + self.lambda_quality * quality_aff)
-        affinity = (
-            self.lambda_dist * dist_aff
-            + self.lambda_scale * scale_aff
-            + self.lambda_motion * motion_aff
-            + self.lambda_quality * quality_aff
-        )
+        affinity = spatial_base * (self.lambda_motion * motion_aff + self.lambda_quality * quality_aff)
+        # affinity = (
+        #     self.lambda_dist * dist_aff
+        #     + self.lambda_scale * scale_aff
+        #     + self.lambda_motion * motion_aff
+        #     + self.lambda_quality * quality_aff
+        # )
         # 如果空间距离太远，或者大小完全不配，或者运动方向差异大，直接一票否决（更严格的标准）
         if norm_dist > 2.0 or scale_aff < 0.5 or motion_aff < 0.6 or quality_aff < 0.3:
             return 0.0, float(norm_dist+1e5), motion_cos
