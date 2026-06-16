@@ -38,14 +38,14 @@ class PGCRelationManager(object):
         self.lambda_scale = getattr(args, "pgc_lambda_scale", 0.20)
         self.lambda_motion = getattr(args, "pgc_lambda_motion", 0.20)
         self.lambda_quality = getattr(args, "pgc_lambda_quality", 0.25)
-        self.alpha = getattr(args, "pgc_smooth_alpha", 0.75)
+        self.alpha = getattr(args, "pgc_smooth_alpha", 0.60)
         self.tau_dist = getattr(args, "pgc_tau_dist", 4.0)
-        self.tau_on = getattr(args, "pgc_tau_on", 0.48)
+        self.tau_on = getattr(args, "pgc_tau_on", 0.60)
         self.tau_weak = getattr(args, "pgc_tau_weak", 0.30)
-        self.tau_react = getattr(args, "pgc_tau_react", 0.42)
+        self.tau_react = getattr(args, "pgc_tau_react", 0.52)
         self.tau_assoc = getattr(args, "pgc_tau_assoc", 0.35)
-        self.k_on = getattr(args, "pgc_k_on", 2)
-        self.k_off = getattr(args, "pgc_k_off", 8)
+        self.k_on = getattr(args, "pgc_k_on", 5)
+        self.k_off = getattr(args, "pgc_k_off", 4)
         self.k_max = getattr(args, "pgc_k_max", 5)
         self.memory_len = getattr(args, "pgc_memory_len", 8)
         self.max_stale = getattr(args, "pgc_max_stale", 30)
@@ -209,8 +209,8 @@ class PGCRelationManager(object):
             + self.lambda_motion * motion_aff
             + self.lambda_quality * quality_aff
         )
-        # 如果空间距离太远，或者大小完全不配，直接一票否决（更严格的标准）
-        if norm_dist > 2.0 or scale_aff < 0.5:
+        # 如果空间距离太远，或者大小完全不配，或者运动方向差异大，直接一票否决（更严格的标准）
+        if norm_dist > 2.0 or scale_aff < 0.5 or motion_aff < 0.6 or quality_aff < 0.3:
             return 0.0, float(norm_dist+1e5), motion_cos
         else:
             return float(np.clip(affinity, 0.0, 1.0)), float(norm_dist), motion_cos
