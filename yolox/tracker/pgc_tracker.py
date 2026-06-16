@@ -466,6 +466,8 @@ class PGCRelationManager(object):
         for key, state in self.pairs.items():
             if state.frozen or state.state not in (PAIR_ACTIVE, PAIR_WEAK) or not state.descriptors:
                 continue
+            if state.affinity < self.tau_on:
+                continue
             tid_a, tid_b = key
             if tid_a in track_by_id and tid_b in track_by_id:
                 pair_items[tid_a].append((state, False))
@@ -479,9 +481,11 @@ class PGCRelationManager(object):
         pair_masks = []
 
         for track in tracks:
-            items = pair_items.get(track.track_id, [])[: self.k_max]
+            items = pair_items.get(track.track_id, [])
             if not items:
                 continue
+            items.sort(key=lambda x: x[0].affinity, reverse=True)
+            items = items[:self.k_max]
             seq = np.zeros((self.k_max, self.memory_len, 10), dtype=np.float32)
             token_mask = np.zeros((self.k_max, self.memory_len), dtype=bool)
             affinity = np.zeros((self.k_max,), dtype=np.float32)
@@ -524,4 +528,5 @@ class PGCRelationManager(object):
             track.pgc_pred_tlwh = pred_tlwh
             track.pgc_occlusion = float(np.clip(occlusions[idx], 0.0, 1.0))
             track.pgc_existence = float(np.clip(existences[idx], 0.0, 1.0))
-            track.pgc_group_reliability = float(np.clip(reliabilities[idx], 0.0, 1.0))
+            affinity_weight = float(np.mean(pair_affinities[idx][pair_masks[idx]])) if np.any(pair_masks[idx]) else 0.0
+            track.pgc_group_reliability = float(np.clip(reliabilities[idx] * affinity_weight, 0.0, 1.0))
