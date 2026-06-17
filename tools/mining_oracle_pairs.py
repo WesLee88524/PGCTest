@@ -152,14 +152,25 @@ def mining_oracle_pairs(gt_data, min_overlap_frames=30, max_dist_ratio=2.5, moti
     return oracle_pairs
 
 
-def process_dataset(data_root, split='train', seqs=None, **kwargs):
-    """处理整个数据集，挖掘所有视频的 Oracle Pairs"""
+def process_dataset(data_root, split='train', seqs=None, dataset_type='mot', **kwargs):
+    """处理整个数据集，挖掘所有视频的 Oracle Pairs
+
+    Args:
+        data_root: 数据集根目录
+        split: 数据集划分 ('train', 'test', 'val')
+        seqs: 指定要处理的序列，None 则处理全部
+        dataset_type: 数据集类型 ('mot', 'dancetrack')
+    """
     all_oracle_pairs = {}
 
-    # MOT 数据集目录结构
-    split_root = os.path.join(data_root, split if 'mot' in data_root.lower() else '')
-    if not os.path.exists(split_root):
-        split_root = data_root
+    # DanceTrack 目录结构
+    if dataset_type.lower() == 'dancetrack':
+        split_root = os.path.join(data_root, split) if os.path.exists(os.path.join(data_root, split)) else data_root
+    else:
+        # MOT 数据集目录结构
+        split_root = os.path.join(data_root, split if 'mot' in data_root.lower() else '')
+        if not os.path.exists(split_root):
+            split_root = data_root
 
     if seqs is None:
         # 自动扫描所有视频序列
@@ -167,6 +178,8 @@ def process_dataset(data_root, split='train', seqs=None, **kwargs):
             seq_root = os.path.join(split_root, 'train')
         elif os.path.exists(os.path.join(split_root, 'test')):
             seq_root = os.path.join(split_root, 'test')
+        elif os.path.exists(os.path.join(split_root, 'val')):
+            seq_root = os.path.join(split_root, 'val')
         else:
             seq_root = split_root
 
@@ -174,7 +187,7 @@ def process_dataset(data_root, split='train', seqs=None, **kwargs):
                 if os.path.isdir(os.path.join(seq_root, d)) and not d.startswith('.')]
 
     for seq_name in seqs:
-        seq_path = os.path.join(split_root, seq_name) if 'train' in split_root or 'test' in split_root else os.path.join(split_root, seq_name)
+        seq_path = os.path.join(seq_root, seq_name)
         if not os.path.isdir(seq_path):
             continue
 
@@ -233,7 +246,10 @@ def analyze_oracle_pairs(oracle_pairs):
 def make_parser():
     parser = argparse.ArgumentParser("Oracle Pair Mining")
     parser.add_argument("--data_dir", type=str, default="datasets/mot",
-                       help="MOT 数据集根目录")
+                       help="数据集根目录 (e.g., datasets/mot 或 datasets/DanceTrack)")
+    parser.add_argument("--dataset_type", type=str, default="mot",
+                       choices=["mot", "dancetrack"],
+                       help="数据集类型 (默认: mot)")
     parser.add_argument("--split", type=str, default="train",
                        choices=["train", "test", "val"],
                        help="数据集划分")
@@ -256,6 +272,7 @@ if __name__ == "__main__":
     print("=" * 60)
     print("Oracle Pair Mining")
     print("=" * 60)
+    print(f"数据集类型: {args.dataset_type}")
     print(f"数据目录: {args.data_dir}")
     print(f"数据集划分: {args.split}")
     print(f"最小共现帧数: {args.min_overlap_frames}")
@@ -267,6 +284,7 @@ if __name__ == "__main__":
         data_root=args.data_dir,
         split=args.split,
         seqs=args.seqs,
+        dataset_type=args.dataset_type,
         min_overlap_frames=args.min_overlap_frames,
         max_dist_ratio=args.max_dist_ratio,
         motion_variance_thresh=args.motion_variance_thresh

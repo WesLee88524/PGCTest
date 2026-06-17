@@ -108,6 +108,7 @@ def make_parser():
     parser.add_argument("--match_thresh", type=float, default=0.9, help="matching threshold for tracking")
     parser.add_argument("--min-box-area", type=float, default=100, help='filter out tiny boxes')
     parser.add_argument("--mot20", dest="mot20", default=False, action="store_true", help="test mot20.")
+    parser.add_argument("--dancetrack", dest="dancetrack", default=False, action="store_true", help="test DanceTrack dataset.")
     parser.add_argument("--use_pgc", dest="use_pgc", default=True, action="store_true", help="enable pair modeling context.")
     parser.add_argument("--no_pgc", dest="use_pgc", action="store_false", help="disable pair modeling context.")
     parser.add_argument("--use_pgc_pair", dest="use_pgc_pair", default=True, action="store_true", help="enable pair affinity/lifecycle modeling.")

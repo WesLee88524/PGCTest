@@ -175,6 +175,10 @@ class MOTEvaluator:
                     self.args.track_thresh = 0.67
                 elif video_name in ['MOT20-06', 'MOT20-08']:
                     self.args.track_thresh = 0.3
+                elif getattr(self.args, 'dancetrack', False):
+                    # DanceTrack: lower threshold for better recall
+                    self.args.track_thresh = 0.4
+                    self.args.track_buffer = 30
                 else:
                     self.args.track_thresh = ori_thresh
 
