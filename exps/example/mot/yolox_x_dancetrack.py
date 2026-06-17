@@ -17,8 +17,8 @@ class Exp(MyExp):
         self.width = 1.25
         self.exp_name = os.path.split(os.path.realpath(__file__))[1].split(".")[0]
         # DanceTrack annotations
-        self.train_ann = "dancetrack_train.json"
-        self.val_ann = "dancetrack_val.json"
+        self.train_ann = "dance_train.json"
+        self.val_ann = "dance_val.json"
         # DanceTrack typically uses 800x1440 or 1088x1920
         self.input_size = (800, 1440)
         self.test_size = (800, 1440)
