@@ -10,6 +10,7 @@ from .kalman_filter import KalmanFilter
 from yolox.tracker import matching
 from .basetrack import BaseTrack, TrackState
 from .pgc_tracker import PGCRelationManager
+from .oracle_injection import OracleInjector, GTBoxProvider
 
 if not hasattr(np, "float"):
     np.float = float
@@ -201,7 +202,7 @@ class STrack(BaseTrack):
 
 
 class BYTETracker(object):
-    def __init__(self, args, frame_rate=30):
+    def __init__(self, args, frame_rate=30, oracle_injector=None, gt_box_provider=None):
         self.tracked_stracks = []  # type: list[STrack]
         self.lost_stracks = []  # type: list[STrack]
         self.removed_stracks = []  # type: list[STrack]
@@ -230,7 +231,11 @@ class BYTETracker(object):
         self.allow_pgc_virtual_output = bool(getattr(args, "allow_pgc_virtual_output", False))
         self.pgc = PGCRelationManager(args) if self.use_pgc else None
 
-    def update(self, output_results, img_info, img_size):
+        # Oracle Pair Injection for ablation study
+        self.oracle_injector = oracle_injector
+        self.gt_box_provider = gt_box_provider
+
+    def update(self, output_results, img_info, img_size, gt_boxes=None):
         self.frame_id += 1
         activated_starcks = []
         refind_stracks = []
@@ -278,6 +283,15 @@ class BYTETracker(object):
         strack_pool = joint_stracks(tracked_stracks, self.lost_stracks)
         # Predict the current location with KF
         STrack.multi_predict(strack_pool)
+
+        # Oracle Pair Injection: Match tracks with GT and override pair states
+        if self.oracle_injector is not None:
+            if gt_boxes is None and self.gt_box_provider is not None:
+                gt_boxes = self.gt_box_provider.get_frame_gt(self.frame_id)
+            if gt_boxes:
+                self.oracle_injector.match_tracks_to_gt(strack_pool, gt_boxes)
+                self._apply_oracle_pairs(strack_pool)
+
         if self.use_pgc and self.use_pgc_pair and self.pgc is not None:
             self.pgc.update(strack_pool, self.frame_id, img_info)
         dists = self._association_distance(strack_pool, detections)
@@ -410,6 +424,57 @@ class BYTETracker(object):
             )
             relaxed[row] *= np.clip(factor, 0.55, 1.0)
         return relaxed
+
+    def _apply_oracle_pairs(self, tracks):
+        """
+        Apply Oracle Pair injection to override PGC pair states.
+
+        This method uses Ground Truth information to determine perfect pairs:
+        - If (GT_ID_i, GT_ID_j) is in Oracle Pair Dict: Force affinity=1.0, state=ACTIVE
+        - Otherwise: Force affinity=0.0, state=UNPAIRED
+        """
+        if self.oracle_injector is None or self.pgc is None:
+            return
+
+        track_by_id = {track.track_id: track for track in tracks}
+
+        for track_i in tracks:
+            for track_j in tracks:
+                if track_i.track_id >= track_j.track_id:
+                    continue
+
+                # Get Oracle affinity and state
+                oracle_affinity = self.oracle_injector.get_oracle_affinity(track_i, track_j)
+                oracle_state = self.oracle_injector.get_oracle_state(track_i, track_j)
+
+                if oracle_affinity is None:
+                    continue
+
+                # Get or create pair state
+                key = self.pgc._pair_key(track_i, track_j)
+                if key not in self.pgc.pairs:
+                    from collections import deque
+                    from yolox.tracker.pgc_tracker import PairState
+                    self.pgc.pairs[key] = PairState()
+
+                pair_state = self.pgc.pairs[key]
+
+                # Override with Oracle values
+                pair_state.affinity = oracle_affinity
+                pair_state.state = oracle_state
+                pair_state.last_frame = self.frame_id
+
+                # If Oracle Pair, set to ACTIVE with high association consistency
+                if oracle_affinity > 0.5:
+                    pair_state.frozen = False
+                    pair_state.assoc_consistency = 1.0
+                    pair_state.on_count = self.pgc.k_on + 1  # Immediately active
+                    pair_state.off_count = 0
+                else:
+                    pair_state.frozen = False
+                    pair_state.assoc_consistency = 0.0
+                    pair_state.on_count = 0
+                    pair_state.off_count = self.pgc.k_off + 1  # Immediately inactive
 
     def _pgc_virtual_maintenance(self, track):
         if track.virtual_update_count >= self.pgc_virtual_max:

@@ -13,6 +13,7 @@ from yolox.utils import (
     xyxy2xywh
 )
 from yolox.tracker.byte_tracker import BYTETracker
+from yolox.tracker.oracle_injection import OracleInjector, GTBoxProvider
 from yolox.sort_tracker.sort import Sort
 from yolox.deepsort_tracker.deepsort import DeepSort
 from yolox.motdt_tracker.motdt_tracker import OnlineTracker
@@ -76,6 +77,22 @@ class MOTEvaluator:
         self.num_classes = num_classes
         self.args = args
 
+        # Initialize Oracle Injector for ablation study
+        self.oracle_injector = None
+        self.gt_box_provider = None
+        if getattr(args, 'use_oracle_pairs', False):
+            oracle_pairs_path = getattr(args, 'oracle_pairs_path', None)
+            gt_file_path = getattr(args, 'gt_file_path', None)
+            if oracle_pairs_path:
+                self.oracle_injector = OracleInjector(
+                    oracle_pairs_path=oracle_pairs_path,
+                    enable=True
+                )
+                logger.info(f"[Oracle] OracleInjector enabled with pairs from {oracle_pairs_path}")
+            if gt_file_path:
+                self.gt_box_provider = GTBoxProvider(gt_file_path=gt_file_path)
+                logger.info(f"[Oracle] GTBoxProvider enabled with file {gt_file_path}")
+
     def evaluate(
         self,
         model,
@@ -125,7 +142,7 @@ class MOTEvaluator:
             model(x)
             model = model_trt
             
-        tracker = BYTETracker(self.args)
+        tracker = BYTETracker(self.args, oracle_injector=self.oracle_injector, gt_box_provider=self.gt_box_provider)
         ori_thresh = self.args.track_thresh
         prev_video_name = None
         for cur_iter, (imgs, _, info_imgs, ids) in enumerate(
@@ -160,7 +177,7 @@ class MOTEvaluator:
                 if video_name not in video_names:
                     video_names[video_id] = video_name
                 if frame_id == 1:
-                    tracker = BYTETracker(self.args)
+                    tracker = BYTETracker(self.args, oracle_injector=self.oracle_injector, gt_box_provider=self.gt_box_provider)
                     if len(results) != 0:
                         result_filename = os.path.join(result_folder, '{}.txt'.format(prev_video_name))
                         write_results(result_filename, results)
