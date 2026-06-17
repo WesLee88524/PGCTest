@@ -96,29 +96,34 @@ class Exp(MyExp):
         return dataloader
 
     def get_eval_loader(self, batch_size, is_distributed, test_dev=False):
-        from yolox.data import MOTDatasetAggregated, TrainTransform
+        from yolox.data import MOTDataset, ValTransform
 
         valdataset = MOTDataset(
             data_dir=os.path.join(get_yolox_datadir(), "dancetrack"),
             json_file=self.val_ann,
-            name='test',
             img_size=self.test_size,
-            preproc=TrainTransform(
+            name='val',
+            preproc=ValTransform(
                 rgb_means=(0.485, 0.456, 0.406),
                 std=(0.229, 0.224, 0.225),
-                max_labels=1200,
             ),
         )
 
-        val_loader = DataLoader(
-            valdataset,
-            batch_size=batch_size,
-            shuffle=False,
-            num_workers=4,
-            pin_memory=True,
-            drop_last=False,
-            collate_fn=MOTDataset.collate_fn,
-        )
+        if is_distributed:
+            batch_size = batch_size // dist.get_world_size()
+            sampler = torch.utils.data.distributed.DistributedSampler(
+                valdataset, shuffle=False
+            )
+        else:
+            sampler = torch.utils.data.SequentialSampler(valdataset)
+
+        dataloader_kwargs = {
+            "num_workers": 4,
+            "pin_memory": True,
+            "sampler": sampler,
+        }
+        dataloader_kwargs["batch_size"] = batch_size
+        val_loader = torch.utils.data.DataLoader(valdataset, **dataloader_kwargs)
 
         return val_loader
 
