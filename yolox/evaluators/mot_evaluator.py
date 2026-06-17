@@ -83,6 +83,7 @@ class MOTEvaluator:
         if getattr(args, 'use_oracle_pairs', False):
             oracle_pairs_path = getattr(args, 'oracle_pairs_path', None)
             gt_file_path = getattr(args, 'gt_file_path', None)
+            gt_root_dir = getattr(args, 'gt_root_dir', None)
             if oracle_pairs_path:
                 self.oracle_injector = OracleInjector(
                     oracle_pairs_path=oracle_pairs_path,
@@ -92,6 +93,9 @@ class MOTEvaluator:
             if gt_file_path:
                 self.gt_box_provider = GTBoxProvider(gt_file_path=gt_file_path)
                 logger.info(f"[Oracle] GTBoxProvider enabled with file {gt_file_path}")
+            elif gt_root_dir:
+                self.gt_box_provider = GTBoxProvider(gt_root_dir=gt_root_dir)
+                logger.info(f"[Oracle] GTBoxProvider enabled with root directory {gt_root_dir}")
 
     def evaluate(
         self,
@@ -177,6 +181,9 @@ class MOTEvaluator:
                 if video_name not in video_names:
                     video_names[video_id] = video_name
                 if frame_id == 1:
+                    # Switch GT provider to new video for Oracle injection
+                    if self.gt_box_provider is not None and hasattr(self.gt_box_provider, 'switch_video'):
+                        self.gt_box_provider.switch_video(video_name)
                     tracker = BYTETracker(self.args, oracle_injector=self.oracle_injector, gt_box_provider=self.gt_box_provider)
                     if len(results) != 0:
                         result_filename = os.path.join(result_folder, '{}.txt'.format(prev_video_name))

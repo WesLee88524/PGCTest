@@ -16,6 +16,7 @@ Oracle Injection Module - 在在线跟踪中注入 Ground Truth Pair 关系
          强制令 A_ij = 0.0, 状态 = UNPAIRED
 """
 
+import os
 import pickle
 import numpy as np
 from scipy.optimize import linear_sum_assignment
@@ -258,22 +259,30 @@ class GTBoxProvider:
     GT Bounding Box 提供器
 
     负责加载和提供每帧的 GT Bounding Boxes
+    支持两种模式:
+    1. 单视频模式: gt_file_path 指定单个 gt.txt 文件
+    2. 多视频模式: gt_root_dir 指定 GT 根目录，根据视频名称自动加载
     """
 
-    def __init__(self, gt_file_path=None):
+    def __init__(self, gt_file_path=None, gt_root_dir=None):
         self.gt_data = {}  # {frame_id: {gt_id: (x, y, w, h)}}
         self.gt_file_path = gt_file_path
+        self.gt_root_dir = gt_root_dir
+        self.current_video_gt_data = {}  # 当前视频的 GT 数据
+        self.current_video_name = None
 
         if gt_file_path:
-            self._load_gt()
+            self._load_gt(gt_file_path)
+        elif gt_root_dir:
+            print(f"[GTBoxProvider] GT root directory: {gt_root_dir}")
 
-    def _load_gt(self):
+    def _load_gt(self, gt_path):
         """加载 GT 文件"""
-        if not self.gt_file_path or not os.path.exists(self.gt_file_path):
-            return
+        if not gt_path or not os.path.exists(gt_path):
+            return {}
 
-        self.gt_data = {}
-        with open(self.gt_file_path, 'r') as f:
+        gt_data = {}
+        with open(gt_path, 'r') as f:
             for line in f:
                 if line.strip() == '' or line.startswith('#'):
                     continue
@@ -284,22 +293,56 @@ class GTBoxProvider:
                     frame_id = int(parts[0])
                     gt_id = int(parts[1])
                     x, y, w, h = float(parts[2]), float(parts[3]), float(parts[4]), float(parts[5])
-                    self.gt_data.setdefault(frame_id, {})[gt_id] = (x, y, w, h)
+                    gt_data.setdefault(frame_id, {})[gt_id] = (x, y, w, h)
                 except (ValueError, IndexError):
                     continue
 
-        print(f"[GTBoxProvider] Loaded GT for {len(self.gt_data)} frames")
+        return gt_data
+
+    def switch_video(self, video_name):
+        """切换到新视频，加载对应的 GT 文件"""
+        if self.gt_root_dir is None:
+            return
+
+        if video_name == self.current_video_name:
+            return
+
+        # 尝试多种可能的 GT 文件路径
+        possible_paths = [
+            os.path.join(self.gt_root_dir, video_name, 'gt', 'gt.txt'),
+            os.path.join(self.gt_root_dir, video_name, 'GT', 'gt.txt'),
+            os.path.join(self.gt_root_dir, video_name, 'groundtruth', 'gt.txt'),
+            os.path.join(self.gt_root_dir, 'train', video_name, 'gt', 'gt.txt'),
+            os.path.join(self.gt_root_dir, 'val', video_name, 'gt', 'gt.txt'),
+        ]
+
+        for gt_path in possible_paths:
+            if os.path.exists(gt_path):
+                self.current_video_gt_data = self._load_gt(gt_path)
+                self.current_video_name = video_name
+                print(f"[GTBoxProvider] Switched to video {video_name}, loaded {len(self.current_video_gt_data)} frames from {gt_path}")
+                return
+
+        # 未找到 GT 文件
+        self.current_video_gt_data = {}
+        self.current_video_name = video_name
+        print(f"[GTBoxProvider] Warning: No GT file found for video {video_name}")
 
     def get_frame_gt(self, frame_id):
         """获取指定帧的 GT Bounding Boxes"""
-        return self.gt_data.get(frame_id, {})
+        if self.gt_file_path:
+            return self.gt_data.get(frame_id, {})
+        elif self.gt_root_dir:
+            return self.current_video_gt_data.get(frame_id, {})
+        return {}
 
     def has_gt(self, frame_id):
         """检查是否有指定帧的 GT"""
-        return frame_id in self.gt_data
-
-
-import os
+        if self.gt_file_path:
+            return frame_id in self.gt_data
+        elif self.gt_root_dir:
+            return frame_id in self.current_video_gt_data
+        return False
 
 
 # 便捷函数：创建 Oracle Injector

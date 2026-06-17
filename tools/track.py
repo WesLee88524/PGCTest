@@ -122,7 +122,8 @@ def make_parser():
     # Oracle Pair arguments for ablation study
     parser.add_argument("--use_oracle_pairs", dest="use_oracle_pairs", default=False, action="store_true", help="enable Oracle Pair injection (GT-based perfect pairs).")
     parser.add_argument("--oracle_pairs_path", type=str, default=None, help="path to Oracle Pairs pickle file (from mining_oracle_pairs.py).")
-    parser.add_argument("--gt_file_path", type=str, default=None, help="path to GT file for track-GT ID matching (e.g., datasets/mot/train/xxx/gt/gt.txt).")
+    parser.add_argument("--gt_file_path", type=str, default=None, help="path to single GT file for track-GT ID matching (e.g., datasets/mot/train/xxx/gt/gt.txt).")
+    parser.add_argument("--gt_root_dir", type=str, default=None, help="GT root directory for multi-video mode (e.g., datasets/mot/train). Auto-loads GT by video name.")
     parser.add_argument("--ningbo_debug", type=str, default="False", choices=["True", "False"], help="use ningbo debug.")    
     return parser
 
